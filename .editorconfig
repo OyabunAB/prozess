@@ -1,0 +1,35 @@
+root = true
+
+[*]
+charset=utf-8
+end_of_line=lf
+insert_final_newline=true
+indent_style=space
+indent_size=4
+
+[{*.yml,*.yaml}]
+indent_size=2
+
+[Makefile]
+indent_style=space
+indent_size=4
+
+[*.{kt,kts}]
+# ktlint specific
+ktlint_code_style=intellij_idea
+ktlint_function_signature_body_expression_wrapping=default
+no-line-break-before-assignment=enabled
+ij_kotlin_packages_to_use_import_on_demand=true
+trim_trailing_whitespace=true
+insert_final_newline=true
+max_line_length=120
+
+# Defines the imports layout. The layout can be composed by the following symbols:
+# "*" - wildcard. There must be at least one entry of a single wildcard to match all other imports. Matches anything after a specified symbol/import as well.
+# "|" - blank line. Supports only single blank lines between imports. No blank line is allowed in the beginning or end of the layout.
+# "^" - alias import, e.g. "^android.*" will match all android alias imports, "^" will match all other alias imports.
+# import paths - these can be full paths, e.g. "java.util.List.*" as well as wildcard paths, e.g. "kotlin.**"
+# Examples (we use ij_kotlin_imports_layout to set an imports layout for both ktlint and IDEA via a single property):
+
+# default IntelliJ IDEA style, same as alphabetical, but with "java", "javax", "kotlin", "kotlinx" and alias imports in the end of the imports list
+ij_kotlin_imports_layout=*,java.**,javax.**,kotlin.**,kotlinx.**,^ 
