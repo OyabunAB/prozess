@@ -26,11 +26,15 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
+      - name: Verify Docker
+        run: docker info
+
       - name: Run tests
         run: ./gradlew test -Pversion=${{ steps.version.outputs.version }}
         env:
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TESTCONTAINERS_RYUK_DISABLED: "true"
 
       - name: Publish to GitHub Packages
         run: ./gradlew publish -Pversion=${{ steps.version.outputs.version }}
