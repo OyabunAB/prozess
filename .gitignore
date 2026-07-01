@@ -3,7 +3,26 @@
 
 # Log file
 *.log
+.docker
+.gradle
+.kotlin
+/build/
+/docs
+!gradle/wrapper/gradle-wrapper.jar
 
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+
+out/
+build/
+logs/
+.*.kt
+.DS_Store
+.env
+.claude
 # BlueJ files
 *.ctxt
 
