@@ -7,9 +7,7 @@ on:
 
 jobs:
   publish:
-    runs-on: oybn-kubernetes-pod
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
