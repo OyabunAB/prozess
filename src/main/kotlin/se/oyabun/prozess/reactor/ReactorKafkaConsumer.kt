@@ -18,12 +18,13 @@ import se.oyabun.prozess.StartOffset.Earliest
 import se.oyabun.prozess.asOffsets
 import se.oyabun.prozess.reactor.Retrying.anyException
 import se.oyabun.prozess.reactor.Retrying.fewRetries
+import se.oyabun.prozess.reactor.Retrying.infiniteRetries
 import se.oyabun.prozess.reactor.Retrying.withRetries
-import org.apache.kafka.common.errors.WakeupException
 import reactor.core.Disposable
 import reactor.core.publisher.Flux
 import reactor.core.publisher.FluxSink
 import reactor.core.publisher.Mono
+import reactor.core.publisher.Mono.defer
 import reactor.core.publisher.Mono.delay
 import reactor.core.publisher.Mono.empty
 import reactor.core.publisher.Mono.error
@@ -89,14 +90,12 @@ class ReactorKafkaConsumer<M>(
         if (!disposed.get()) Mono.empty()
         else fromCallable { client.wakeup() }
             .then(Mono.fromRunnable { closeSignal.tryEmitEmpty() })
-            .then(Mono.fromRunnable { subscription?.dispose() })
             .then(Mono.fromRunnable { shutdownSignal.tryEmitValue(Unit) })
-            .then(Mono.fromRunnable { processedSink?.tryEmitComplete() })
             .then(
                 if (pipelinesActive.get())
-                    Mono.`when`(pollingDone.asMono(), emittingDone.asMono(), committingDone.asMono())
-                        .timeout(3.seconds.toJavaDuration())
-                        .onErrorResume { e -> log.kafka.terminatedUnexpectedly(instanceId, e); empty() }
+                    Mono.`when`(pollingDone.asMono(), emittingDone.asMono())
+                        .then(Mono.fromRunnable { processedSink?.tryEmitComplete() })
+                        .then(committingDone.asMono())
                 else Mono.empty()
             )
             .then(client.close())
@@ -112,7 +111,7 @@ class ReactorKafkaConsumer<M>(
         until: EndOffset = EndOffset.Continuous,
     ) {
         check(started.compareAndSet(false, true)) { "$instanceId start() called more than once" }
-        val processed = Sinks.many().multicast().onBackpressureBuffer<Position>()
+        val processed = Sinks.many().multicast().onBackpressureBuffer<Position>(config.maxPollRecords)
         processedSink = processed
         val complete = completionSignal(processed)
         val sync = syncSignal(until, complete)
@@ -132,7 +131,6 @@ class ReactorKafkaConsumer<M>(
     fun shutdown() {
         if (!disposed.compareAndSet(false, true)) return
         shutdownTask
-            .timeout(5.seconds.toJavaDuration())
             .onErrorResume { e -> log.kafka.terminatedUnexpectedly(instanceId, e); empty() }
             .block()
     }
@@ -241,23 +239,34 @@ class ReactorKafkaConsumer<M>(
         }
     }
 
-    private fun emitProcessed(sink: Sinks.Many<Position>, position: Position): Mono<Position> {
-        val result = sink.tryEmitNext(position)
-        return when {
-            result === Sinks.EmitResult.OK -> just(position)
-            result === Sinks.EmitResult.FAIL_TERMINATED || result === Sinks.EmitResult.FAIL_CANCELLED -> just(position)
-            else -> error(RuntimeException("$instanceId failed to emit position $position to processed sink: $result"))
+    private fun emitProcessed(sink: Sinks.Many<Position>, position: Position): Mono<Position> =
+        defer {
+            val result = sink.tryEmitNext(position)
+            when {
+                result === Sinks.EmitResult.OK -> just(position)
+                result === Sinks.EmitResult.FAIL_TERMINATED || result === Sinks.EmitResult.FAIL_CANCELLED -> just(position)
+                result === Sinks.EmitResult.FAIL_OVERFLOW -> {
+                    if (disposed.get()) just(position)
+                    else {
+                        log.kafka.commitBackpressure(instanceId, position.partition)
+                        delay(100.milliseconds.toJavaDuration()).then(emitProcessed(sink, position))
+                    }
+                }
+                else -> error(RuntimeException("$instanceId failed to emit position $position to processed sink: $result"))
+            }
         }
-    }
 
     private fun processRetrying(received: Received, attempt: Long = 0): Mono<Position> =
         fromCallable { deserializer.invoke(received.message) }
             .map { process(received, it); received.position }
             .onErrorResume { e ->
-                log.kafka.processingRetrying(instanceId, received.position.partition, attempt, e)
-                delay(backoff(attempt))
-                    .thenReturn(received)
-                    .flatMap { processRetrying(it, attempt + 1) }
+                if (disposed.get()) Mono.error(e)
+                else {
+                    log.kafka.processingRetrying(instanceId, received.position.partition, attempt, e)
+                    delay(backoff(attempt))
+                        .thenReturn(received)
+                        .flatMap { processRetrying(it, attempt + 1) }
+                }
             }
 
     private fun onPartitionsRevoked(context: RebalanceContext, domain: Partitions) {
@@ -344,7 +353,7 @@ class ReactorKafkaConsumer<M>(
     ): Disposable = processed.asFlux()
         .bufferTimeout(maxSize, maxTime)
         .publishOn(scheduler)
-        .flatMap { batch ->
+        .concatMap { batch ->
             val assigned = assignments.load()
             val current = batch.filter { it.partition in assigned }
             if (current.isEmpty()) empty()
@@ -355,10 +364,8 @@ class ReactorKafkaConsumer<M>(
                 client.commit(latest, meta)
                     .doOnError { cause -> log.kafka.commitFailed(instanceId, topicPartitions, cause) }
                     .doOnSuccess { log.kafka.committed(instanceId, topicPartitions) }
-                    .withRetries(id = instanceId, retryOn = anyException, maxAttempts = fewRetries)
-                    .doOnError { cause -> log.kafka.commitExhausted(instanceId, cause) }
-                    .onErrorComplete()
-            }
+                    .withRetries(id = instanceId, retryOn = anyException, maxAttempts = infiniteRetries)
+                }
         }
         .retryWhen(restartIndefinitely(component))
         .ignoreElements()
@@ -412,10 +419,7 @@ class ReactorKafkaConsumer<M>(
         .onBackpressureDrop()
         .concatMap {
             client.poll()
-                .onErrorResume(WakeupException::class.java) { just(emptyList()) }
-                .withRetries(id = instanceId, retryOn = anyException, maxAttempts = fewRetries)
-                .doOnError { cause -> log.kafka.pollExhausted(instanceId, cause) }
-                .onErrorReturn(emptyList())
+                .withRetries(id = instanceId, retryOn = anyException, maxAttempts = infiniteRetries)
         }
         .doOnNext { records -> if (records.isNotEmpty()) log.kafka.polled(instanceId, records.size) }
         .concatMapIterable { it }

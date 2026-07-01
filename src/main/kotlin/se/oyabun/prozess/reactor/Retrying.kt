@@ -17,6 +17,7 @@ object Retrying {
     val log = Logging.logger { }
     val fixedDelay: Duration = 3.seconds
     val fewRetries: Long = 3L
+    val infiniteRetries: Long = Long.MAX_VALUE
     val anyException: (Throwable) -> Boolean = { true }
 
     @OptIn(ExperimentalAtomicApi::class)

@@ -26,6 +26,8 @@ class Logger(private val delegate: KLogger) {
             delegate.debug { "$instance restarted listening to $topics" }
         fun commitExhausted(instance: String, cause: Throwable) =
             delegate.warn(cause) { "$instance commit exhausted retries, skipping batch" }
+        fun commitBackpressure(instance: String, partition: Partition) =
+            delegate.warn { "$instance commit pipeline stalled — backpressuring $partition" }
         fun pollExhausted(instance: String, cause: Throwable) =
             delegate.warn(cause) { "$instance poll exhausted retries, skipping tick" }
         fun bufferDrained(instance: String, assignments: Any, size: Int) =
