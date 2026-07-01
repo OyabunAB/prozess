@@ -10,6 +10,9 @@ import org.junit.jupiter.api.assertThrows
 import org.testcontainers.kafka.KafkaContainer
 import se.oyabun.prozess.Prozess.ConsumerFilter
 import se.oyabun.prozess.Prozess.ConsumerProcess
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -42,13 +45,37 @@ class KafkaTests {
         fun `can consume from beginning`() {
             val topic = topic(bootstrapServers)
             val groupId = groupId()
-            val published = publish(bootstrapServers, topic, count = 5)
+            val count = 5
+            val published = publish(bootstrapServers, topic, count = count)
             val received = mutableListOf<String>()
+            val latch = CountDownLatch(count)
             val config = ConsumerConfig(bootstrapServers, groupId, topic)
-            val consumer = stringConsumer(config) { _, message -> received.add(message) }
+            val consumer = stringConsumer(config) { _, message ->
+                received.add(message)
+                latch.countDown()
+            }
             consumer.start(from = StartOffset.Earliest)
-            Thread.sleep(3000)
+            assertTrue(latch.await(10, TimeUnit.SECONDS), "timed out waiting for $count messages")
             assertEquals(published.sorted(), received.sorted())
+            consumer.shutdown()
+        }
+
+        @Test
+        fun `can consume high volume from multiple partitions`() {
+            val topicName = topic(bootstrapServers, partitions = 3)
+            val groupId = groupId()
+            val count = 100
+            val published = publish(bootstrapServers, topicName, count = count)
+            val received = ConcurrentLinkedQueue<String>()
+            val latch = CountDownLatch(count)
+            val config = ConsumerConfig(bootstrapServers, groupId, setOf(topicName))
+            val consumer = stringConsumer(config) { _, message ->
+                received.add(message)
+                latch.countDown()
+            }
+            consumer.start(from = StartOffset.Earliest)
+            assertTrue(latch.await(20, TimeUnit.SECONDS), "timed out waiting for $count messages, got ${received.size}")
+            assertEquals(published.sorted(), received.sorted().toList())
             consumer.shutdown()
         }
 
@@ -84,6 +111,48 @@ class KafkaTests {
             consumer.pause()
             consumer.resume()
             consumer.shutdown()
+        }
+
+        @Test
+        fun `shutdown during active processing is clean`() {
+            val topic = topic(bootstrapServers)
+            publish(bootstrapServers, topic, count = 200)
+            val config = ConsumerConfig(bootstrapServers, groupId(), topic)
+            val consumer = stringConsumer(config)
+            consumer.start(from = StartOffset.Earliest)
+            consumer.shutdown()
+            assertTrue(consumer.isDisposed)
+        }
+
+        @Test
+        fun `restart from committed offsets`() {
+            val topicName = topic(bootstrapServers, partitions = 3)
+            val groupId = groupId()
+            val count = 100
+            val published = publish(bootstrapServers, topicName, count = count)
+
+            val first = ConcurrentLinkedQueue<String>()
+            val firstLatch = CountDownLatch(count)
+            val firstConsumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, m ->
+                first.add(m)
+                firstLatch.countDown()
+            }
+            firstConsumer.start(from = StartOffset.Earliest)
+            assertTrue(firstLatch.await(30, TimeUnit.SECONDS), "first consumer timed out, got ${first.size}")
+            firstConsumer.shutdown()
+            assertEquals(published.sorted(), first.sorted().toList())
+
+            val second = ConcurrentLinkedQueue<String>()
+            val secondLatch = CountDownLatch(1)
+            val secondConsumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, m ->
+                second.add(m)
+                secondLatch.countDown()
+            }
+            secondConsumer.start(from = StartOffset.Earliest)
+            val replayed = !secondLatch.await(3, TimeUnit.SECONDS)
+            secondConsumer.shutdown()
+
+            assertTrue(replayed, "restart replayed ${second.size} messages — offsets were lost")
         }
     }
 

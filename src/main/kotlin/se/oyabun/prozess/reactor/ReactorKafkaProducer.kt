@@ -7,6 +7,7 @@ import se.oyabun.prozess.ProducerConfig
 import se.oyabun.prozess.Prozess.KeyExtraction
 import se.oyabun.prozess.Prozess.Serializer
 import se.oyabun.prozess.reactor.Retrying.anyException
+import se.oyabun.prozess.reactor.Retrying.infiniteRetries
 import se.oyabun.prozess.reactor.Retrying.withRetries
 import org.apache.kafka.clients.consumer.OffsetAndMetadata
 import org.apache.kafka.clients.producer.KafkaProducer
@@ -32,7 +33,7 @@ class ReactorKafkaProducer<M : Any>(
                 if (exception != null) sink.error(exception)
                 else sink.success(metadata.offset())
             }
-        }.withRetries(id = instanceId, retryOn = anyException, maxAttempts = Long.MAX_VALUE)
+        }.withRetries(id = instanceId, retryOn = anyException, maxAttempts = infiniteRetries)
 
     fun sendAll(
         source: Flux<M>,

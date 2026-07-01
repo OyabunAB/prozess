@@ -25,6 +25,7 @@ import reactor.core.publisher.Mono
 import reactor.core.publisher.Mono.fromCallable
 import reactor.core.scheduler.Schedulers
 import se.oyabun.prozess.RebalanceContext
+import org.apache.kafka.common.errors.WakeupException
 import java.time.Instant
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
@@ -89,9 +90,14 @@ internal class ThreadsafeKafkaClient(config: ConsumerConfig) {
         .subscribeOn(scheduler)
 
     fun poll(timeout: Duration = 100.milliseconds): Mono<List<Received>> =
-        fromCallable { delegate.poll(timeout.toJavaDuration()) }
-            .map { records -> records.map { it.toReceived() } }
-            .subscribeOn(scheduler)
+        fromCallable {
+            try {
+                delegate.poll(timeout.toJavaDuration())
+                    .map { it.toReceived() }
+            } catch (_: WakeupException) {
+                emptyList()
+            }
+        }.subscribeOn(scheduler)
 
     inner class PollContext(val delegate: KafkaConsumer<*,*>) : RebalanceContext {
         override fun position(partition: Partition): Long = delegate.position(partition.toApache())
@@ -115,12 +121,11 @@ internal class ThreadsafeKafkaClient(config: ConsumerConfig) {
         fromCallable { delegate.resume(partitions.map { it.toApache() }); partitions }
             .subscribeOn(scheduler)
 
-    fun commit(offsets: Offsets, metadata: String): Mono<Offsets> = Mono.create { sink ->
+    fun commit(offsets: Offsets, metadata: String): Mono<Offsets> = fromCallable {
         val apache = offsets.mapKeys { it.key.toApache() }
             .mapValues { org.apache.kafka.clients.consumer.OffsetAndMetadata(it.value, metadata) }
-        delegate.commitAsync(apache) { _, exception ->
-            if (exception != null) sink.error(exception) else sink.success(offsets)
-        }
+        delegate.commitSync(apache)
+        offsets
     }.subscribeOn(scheduler)
 
     fun committed(partitions: Partitions): Mono<Offsets> =
