@@ -5,8 +5,8 @@ import se.oyabun.prozess.reactor.ReactorKafkaProducer
 
 object Prozess {
     typealias KeyExtraction<M> = (M) -> String
-    typealias Deserializer<M> = (M) -> ByteArray
-    typealias Serializer<M> = (ByteArray) -> M
+    typealias Serializer<M> = (M) -> ByteArray
+    typealias Deserializer<M> = (ByteArray) -> M
     typealias ConsumerFilter = (Received) -> Boolean
     typealias ConsumerProcess<M> = (Received, M) -> Unit
 
@@ -34,11 +34,11 @@ object Prozess {
     fun <M> consumer(
         config: ConsumerConfig,
         filter: ConsumerFilter = { true },
-        serializer: Serializer<M>,
+        deserializer: Deserializer<M>,
         process: ConsumerProcess<M> = { _,_ -> },
-        instance: String? = "(❍ᴥ❍ʋ)",
+        instance: String? = "consumer",
     ): Consumer<M> = object : Consumer<M> {
-        private val delegate = ReactorKafkaConsumer(config, filter, serializer, process, instance)
+        private val delegate = ReactorKafkaConsumer(config, filter, deserializer, process, instance)
         override fun start(from: StartOffset, until: EndOffset) = delegate.start(from, until)
         override fun shutdown() { delegate.shutdownAsync().block() }
         override val isDisposed: Boolean get() = delegate.isDisposed
@@ -51,10 +51,10 @@ object Prozess {
 
     fun <M : Any> producer(
         config: ProducerConfig,
-        deserializer: Deserializer<M>,
-        instance: String? = "| (• ◡•)|",
+        serializer: Serializer<M>,
+        instance: String? = "producer",
     ): Producer<M> = object : Producer<M> {
-        val delegate = ReactorKafkaProducer(config, instance, deserializer)
+        val delegate = ReactorKafkaProducer(config, instance, serializer)
         override fun send(key: String, value: M, partition: Int?, timestamp: Long?): Long { return delegate.send(key, value, partition, timestamp).blockOptional().orElseThrow() }
         override fun sendOffsetsToTransaction(offsets: Offsets, member: GroupMember) { delegate.sendOffsetsToTransaction(offsets, member).block() }
         override fun initTransactions() { delegate.initTransactions().block() }

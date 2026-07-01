@@ -5,7 +5,7 @@ import se.oyabun.prozess.Logging
 import se.oyabun.prozess.Offsets
 import se.oyabun.prozess.ProducerConfig
 import se.oyabun.prozess.Prozess.KeyExtraction
-import se.oyabun.prozess.Prozess.Deserializer
+import se.oyabun.prozess.Prozess.Serializer
 import se.oyabun.prozess.reactor.Retrying.anyException
 import se.oyabun.prozess.reactor.Retrying.withRetries
 import org.apache.kafka.clients.consumer.OffsetAndMetadata
@@ -17,8 +17,8 @@ import reactor.core.scheduler.Schedulers
 
 class ReactorKafkaProducer<M : Any>(
     val config: ProducerConfig,
-    instance: String? = "| (• ◡•)|",
-    private val deserializer: Deserializer<M>,
+    instance: String? = "producer",
+    private val serializer: Serializer<M>,
 ) {
     private val log = Logging.logger { }
     private val instanceId = "[$instance ${config.topic} producer]"
@@ -27,7 +27,7 @@ class ReactorKafkaProducer<M : Any>(
     fun send(key: String, value: M, partition: Int? = null, timestamp: Long? = null): Mono<Long> =
         Mono.create { sink ->
             delegate.send(
-                org.apache.kafka.clients.producer.ProducerRecord(config.topic.name, partition, timestamp, key, deserializer(value)),
+                org.apache.kafka.clients.producer.ProducerRecord(config.topic.name, partition, timestamp, key, serializer(value)),
             ) { metadata, exception ->
                 if (exception != null) sink.error(exception)
                 else sink.success(metadata.offset())

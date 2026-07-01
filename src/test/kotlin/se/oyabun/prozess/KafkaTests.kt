@@ -16,7 +16,7 @@ import kotlin.test.assertTrue
 @TestInstance(Lifecycle.PER_CLASS)
 class KafkaTests {
 
-    private val kafka = KafkaContainer("apache/kafka-native:3.8.0")
+    private val kafka = KafkaContainer("apache/kafka-native:3.9.2")
     private val bootstrapServers get() = kafka.bootstrapServers
 
     @BeforeAll
@@ -105,7 +105,7 @@ class KafkaTests {
     ) = Prozess.consumer(
         config = config,
         filter = filter,
-        serializer = { String(it) },
+        deserializer = { String(it) },
         process = process,
     )
 }

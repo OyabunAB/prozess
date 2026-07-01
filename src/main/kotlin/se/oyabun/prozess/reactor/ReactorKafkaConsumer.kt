@@ -55,9 +55,9 @@ import kotlin.time.toJavaDuration
 class ReactorKafkaConsumer<M>(
     val config: ConsumerConfig,
     private val filter: ConsumerFilter = { true },
-    private val serializer: Prozess.Serializer<M>,
+    private val deserializer: Prozess.Deserializer<M>,
     private val process: ConsumerProcess<M> = { _,_ -> },
-    instance: String? = "(❍ᴥ❍ʋ)",
+    instance: String? = "consumer",
 ) {
     private val log = Logging.logger { }
     private val instanceId = "[$instance ${config.topics} consumer]"
@@ -220,7 +220,7 @@ class ReactorKafkaConsumer<M>(
     }
 
     private fun processRetrying(received: Received, attempt: Long = 0): Mono<Position> =
-        fromCallable { serializer.invoke(received.message) }
+        fromCallable { deserializer.invoke(received.message) }
             .map { process(received, it); received.position }
             .onErrorResume { e ->
                 log.kafka.processingRetrying(instanceId, received.position.partition, attempt, e)
