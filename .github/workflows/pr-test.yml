@@ -6,10 +6,7 @@ on:
 
 jobs:
   test:
-    if: github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: oybn-kubernetes-pod
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: read
@@ -22,6 +19,3 @@ jobs:
           distribution: temurin
 
       - run: ./gradlew check
-        env:
-          GITHUB_ACTOR: ${{ github.actor }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
