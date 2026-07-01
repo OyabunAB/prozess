@@ -40,7 +40,7 @@ object Prozess {
     ): Consumer<M> = object : Consumer<M> {
         private val delegate = ReactorKafkaConsumer(config, filter, deserializer, process, instance)
         override fun start(from: StartOffset, until: EndOffset) = delegate.start(from, until)
-        override fun shutdown() { delegate.shutdownAsync().block() }
+        override fun shutdown() = delegate.shutdown()
         override val isDisposed: Boolean get() = delegate.isDisposed
         override fun pause() = delegate.pause()
         override fun resume() = delegate.resume()

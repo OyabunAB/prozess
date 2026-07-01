@@ -132,7 +132,10 @@ internal class ThreadsafeKafkaClient(config: ConsumerConfig) {
 
     fun wakeup() = delegate.wakeup()
 
-    fun close(): Mono<Void> = fromCallable { delegate.close(3.seconds.toJavaDuration()) }.then()
+    fun close(): Mono<Void> = fromCallable {
+        delegate.close(3.seconds.toJavaDuration())
+        scheduler.dispose()
+    }.then()
         .subscribeOn(scheduler)
 
     private fun Partition.toApache() = org.apache.kafka.common.TopicPartition(topic.name, id)

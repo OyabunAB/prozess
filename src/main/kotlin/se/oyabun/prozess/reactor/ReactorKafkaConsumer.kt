@@ -19,6 +19,7 @@ import se.oyabun.prozess.asOffsets
 import se.oyabun.prozess.reactor.Retrying.anyException
 import se.oyabun.prozess.reactor.Retrying.fewRetries
 import se.oyabun.prozess.reactor.Retrying.withRetries
+import org.apache.kafka.common.errors.WakeupException
 import reactor.core.Disposable
 import reactor.core.publisher.Flux
 import reactor.core.publisher.FluxSink
@@ -74,6 +75,37 @@ class ReactorKafkaConsumer<M>(
     private val disposed = java.util.concurrent.atomic.AtomicBoolean(false)
     private var shutdownDone = Sinks.one<Unit>()
     private var subscription: Disposable? = null
+    private var processedSink: Sinks.Many<Position>? = null
+    private var pipelinesActive = java.util.concurrent.atomic.AtomicBoolean(false)
+    private var shutdownSignal = Sinks.one<Unit>()
+    private var pollingDone = Sinks.one<Unit>()
+    private var emittingDone = Sinks.one<Unit>()
+    private var committingDone = Sinks.one<Unit>()
+    private val commitScheduler = java.util.concurrent.atomic.AtomicReference(Schedulers.immediate())
+    private val emitScheduler = java.util.concurrent.atomic.AtomicReference(Schedulers.immediate())
+    private val pollScheduler = java.util.concurrent.atomic.AtomicReference(Schedulers.immediate())
+
+    private val shutdownTask: Mono<Void> = Mono.defer {
+        if (!disposed.get()) Mono.empty()
+        else fromCallable { client.wakeup() }
+            .then(Mono.fromRunnable { closeSignal.tryEmitEmpty() })
+            .then(Mono.fromRunnable { subscription?.dispose() })
+            .then(Mono.fromRunnable { shutdownSignal.tryEmitValue(Unit) })
+            .then(Mono.fromRunnable { processedSink?.tryEmitComplete() })
+            .then(
+                if (pipelinesActive.get())
+                    Mono.`when`(pollingDone.asMono(), emittingDone.asMono(), committingDone.asMono())
+                        .timeout(3.seconds.toJavaDuration())
+                        .onErrorResume { e -> log.kafka.terminatedUnexpectedly(instanceId, e); empty() }
+                else Mono.empty()
+            )
+            .then(client.close())
+            .doFinally {
+                commitScheduler.get().dispose()
+                emitScheduler.get().dispose()
+                pollScheduler.get().dispose()
+            }
+    }.cache()
 
     fun start(
         from: StartOffset = StartOffset.Latest,
@@ -81,6 +113,7 @@ class ReactorKafkaConsumer<M>(
     ) {
         check(started.compareAndSet(false, true)) { "$instanceId start() called more than once" }
         val processed = Sinks.many().multicast().onBackpressureBuffer<Position>()
+        processedSink = processed
         val complete = completionSignal(processed)
         val sync = syncSignal(until, complete)
         shutdownDone = Sinks.one()
@@ -98,17 +131,15 @@ class ReactorKafkaConsumer<M>(
 
     fun shutdown() {
         if (!disposed.compareAndSet(false, true)) return
-        client.wakeup()
-        closeSignal.tryEmitEmpty()
-        subscription?.dispose()
+        shutdownTask
+            .timeout(5.seconds.toJavaDuration())
+            .onErrorResume { e -> log.kafka.terminatedUnexpectedly(instanceId, e); empty() }
+            .block()
     }
 
     fun shutdownAsync(): Mono<Void> {
-        if (!disposed.compareAndSet(false, true)) return shutdownDone.asMono().then()
-        client.wakeup()
-        closeSignal.tryEmitEmpty()
-        subscription?.dispose()
-        return shutdownDone.asMono().then()
+        if (!disposed.compareAndSet(false, true)) return shutdownTask
+        return shutdownTask
     }
 
     val isDisposed: Boolean get() = disposed.get()
@@ -284,36 +315,21 @@ class ReactorKafkaConsumer<M>(
         sync: Mono<Received>,
     ): Flux<Received> = Flux.create { emitter: FluxSink<Received> ->
         val buffer = Queues.unbounded<Received>().get()
-        val shutdown = Sinks.one<Unit>()
-        val pollingDone = Sinks.one<Unit>()
-        val emittingDone = Sinks.one<Unit>()
-        val committingDone = Sinks.one<Unit>()
-        val commitScheduler = Schedulers.newSingle("$instanceId-$COMMIT_PIPELINE")
-        val emitScheduler = Schedulers.newSingle("$instanceId-$EMITTER")
-        val pollScheduler = Schedulers.newSingle("$instanceId-$POLL_LOOP")
-        committingPipeline(processed, topicPartitions, committingDone, scheduler = commitScheduler)
-        emittingPipeline(buffer, emitter, shutdown.asMono(), emittingDone, timer = emitScheduler)
-        pollingPipeline(buffer, shutdown.asMono(), pollingDone, timer = pollScheduler, period = config.pollInterval)
+        shutdownSignal = Sinks.one()
+        pollingDone = Sinks.one()
+        emittingDone = Sinks.one()
+        committingDone = Sinks.one()
+        commitScheduler.set(Schedulers.newSingle("$instanceId-$COMMIT_PIPELINE"))
+        emitScheduler.set(Schedulers.newSingle("$instanceId-$EMITTER"))
+        pollScheduler.set(Schedulers.newSingle("$instanceId-$POLL_LOOP"))
+        pipelinesActive.set(true)
+        committingPipeline(processed, topicPartitions, committingDone, scheduler = commitScheduler.get())
+        emittingPipeline(buffer, emitter, shutdownSignal.asMono(), emittingDone, timer = emitScheduler.get())
+        pollingPipeline(buffer, shutdownSignal.asMono(), pollingDone, timer = pollScheduler.get(), period = config.pollInterval)
         emitter.onDispose {
-            shutdown.tryEmitValue(Unit)
+            shutdownSignal.tryEmitValue(Unit)
             processed.tryEmitComplete()
-            `when`(pollingDone.asMono(), emittingDone.asMono(), committingDone.asMono())
-                .timeout(3.seconds.toJavaDuration())
-                .onErrorResume { empty() }
-                .then(client.close())
-                .doFinally {
-                    commitScheduler.dispose()
-                    emitScheduler.dispose()
-                    pollScheduler.dispose()
-                    shutdownDone.tryEmitEmpty()
-                }
-                .subscribe(
-                    {},
-                    { cause ->
-                        log.kafka.terminatedUnexpectedly(instanceId, cause)
-                        shutdownDone.tryEmitEmpty()
-                    },
-                )
+            shutdownDone.tryEmitEmpty()
         }
     }.takeUntilOther(sync)
 
@@ -396,6 +412,7 @@ class ReactorKafkaConsumer<M>(
         .onBackpressureDrop()
         .concatMap {
             client.poll()
+                .onErrorResume(WakeupException::class.java) { just(emptyList()) }
                 .withRetries(id = instanceId, retryOn = anyException, maxAttempts = fewRetries)
                 .doOnError { cause -> log.kafka.pollExhausted(instanceId, cause) }
                 .onErrorReturn(emptyList())
