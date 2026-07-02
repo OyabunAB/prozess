@@ -49,7 +49,7 @@ class KafkaTests {
             val published = publish(bootstrapServers, topic, count = count)
             val received = mutableListOf<String>()
             val latch = CountDownLatch(count)
-            val config = ConsumerConfig(bootstrapServers, groupId, topic)
+            val config = ConsumerConfig(bootstrapServers, groupId, setOf(topic))
             val consumer = stringConsumer(config) { _, message ->
                 received.add(message)
                 latch.countDown()
@@ -149,10 +149,10 @@ class KafkaTests {
                 secondLatch.countDown()
             }
             secondConsumer.start(from = StartOffset.Earliest)
-            val replayed = !secondLatch.await(3, TimeUnit.SECONDS)
+            val noReplay = !secondLatch.await(3, TimeUnit.SECONDS)
             secondConsumer.shutdown()
 
-            assertTrue(replayed, "restart replayed ${second.size} messages — offsets were lost")
+            assertTrue(noReplay, "restart replayed ${second.size} messages — offsets were lost")
         }
     }
 
