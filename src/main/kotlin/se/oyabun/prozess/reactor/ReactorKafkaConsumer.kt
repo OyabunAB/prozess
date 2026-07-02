@@ -17,7 +17,6 @@ import se.oyabun.prozess.StartOffset.AtTimestamp
 import se.oyabun.prozess.StartOffset.Earliest
 import se.oyabun.prozess.asOffsets
 import se.oyabun.prozess.reactor.Retrying.anyException
-import se.oyabun.prozess.reactor.Retrying.fewRetries
 import se.oyabun.prozess.reactor.Retrying.infiniteRetries
 import se.oyabun.prozess.reactor.Retrying.withRetries
 import reactor.core.Disposable
@@ -84,7 +83,7 @@ class ReactorKafkaConsumer<M>(
     private var committingDone = Sinks.one<Unit>()
     private val commitScheduler = java.util.concurrent.atomic.AtomicReference(Schedulers.immediate())
     private val emitScheduler = java.util.concurrent.atomic.AtomicReference(Schedulers.immediate())
-    private val pollScheduler = java.util.concurrent.atomic.AtomicReference(Schedulers.immediate())
+    private var poller: Poller? = null
 
     private val shutdownTask: Mono<Void> = Mono.defer {
         if (!disposed.get()) Mono.empty()
@@ -102,7 +101,7 @@ class ReactorKafkaConsumer<M>(
             .doFinally {
                 commitScheduler.get().dispose()
                 emitScheduler.get().dispose()
-                pollScheduler.get().dispose()
+                poller?.stop()
             }
     }.cache()
 
@@ -144,18 +143,12 @@ class ReactorKafkaConsumer<M>(
 
     fun pause() {
         paused.set(true)
-        val current = assignments.load()
-        if (current.isNotEmpty()) {
-            client.pause(current).block()
-        }
+        poller?.pause()
     }
 
     fun resume() {
         paused.set(false)
-        val current = assignments.load()
-        if (current.isNotEmpty()) {
-            client.resume(current).block()
-        }
+        poller?.resume()
     }
 
     private fun incomingFeed(
@@ -330,11 +323,24 @@ class ReactorKafkaConsumer<M>(
         committingDone = Sinks.one()
         commitScheduler.set(Schedulers.newSingle("$instanceId-$COMMIT_PIPELINE"))
         emitScheduler.set(Schedulers.newSingle("$instanceId-$EMITTER"))
-        pollScheduler.set(Schedulers.newSingle("$instanceId-$POLL_LOOP"))
         pipelinesActive.set(true)
         committingPipeline(processed, topicPartitions, committingDone, scheduler = commitScheduler.get())
         emittingPipeline(buffer, emitter, shutdownSignal.asMono(), emittingDone, timer = emitScheduler.get())
-        pollingPipeline(buffer, shutdownSignal.asMono(), pollingDone, timer = pollScheduler.get(), period = config.pollInterval)
+        poller = BufferedPoller(
+            poll = Poller.Poll { client.poll() },
+            pause = Poller.Pause { client.pause(it) },
+            resume = Poller.Resume { client.resume(it) },
+            buffer = buffer,
+            assignments = { assignments.load() },
+            highWaterMark = highWaterMark,
+            lowWaterMark = lowWaterMark,
+            instanceId = instanceId,
+            pollInterval = config.pollInterval,
+            shutdown = shutdownSignal.asMono(),
+            done = pollingDone,
+            log = log,
+        )
+        poller?.start()
         emitter.onDispose {
             shutdownSignal.tryEmitValue(Unit)
             processed.tryEmitComplete()
@@ -392,44 +398,6 @@ class ReactorKafkaConsumer<M>(
             else {
                 log.kafka.emitted(instanceId, received.position)
                 emitter.next(received)
-                if (buffer.size < lowWaterMark && current.isNotEmpty()) {
-                    log.kafka.bufferDrained(instanceId, current, buffer.size)
-                    client.resume(current).thenReturn(received)
-                } else {
-                    just(received)
-                }
-            }
-        }
-        .retryWhen(restartIndefinitely(component))
-        .takeUntilOther(shutdown)
-        .subscribe(
-            {},
-            { signalCompletion(done, component, it) },
-            { signalCompletion(done, component) },
-        )
-
-    private fun pollingPipeline(
-        buffer: Queue<Received>,
-        shutdown: Mono<Unit>,
-        done: Sinks.One<Unit>,
-        component: String = "$instanceId-$POLL_LOOP",
-        timer: Scheduler = Schedulers.newSingle(component),
-        period: Duration,
-    ): Disposable = Flux.interval(period.toJavaDuration(), timer)
-        .onBackpressureDrop()
-        .concatMap {
-            client.poll()
-                .withRetries(id = instanceId, retryOn = anyException, maxAttempts = infiniteRetries)
-        }
-        .doOnNext { records -> if (records.isNotEmpty()) log.kafka.polled(instanceId, records.size) }
-        .concatMapIterable { it }
-        .concatMap { received ->
-            buffer.add(received)
-            val current = assignments.load()
-            if (buffer.size >= highWaterMark && current.isNotEmpty()) {
-                log.kafka.bufferSaturated(instanceId, current, buffer.size)
-                client.pause(current).thenReturn(received)
-            } else {
                 just(received)
             }
         }
@@ -440,6 +408,7 @@ class ReactorKafkaConsumer<M>(
             { signalCompletion(done, component, it) },
             { signalCompletion(done, component) },
         )
+
 
     private fun signalCompletion(done: Sinks.One<Unit>, component: String, cause: Throwable? = null) {
         if (cause != null) log.kafka.terminatedUnexpectedly(component, cause)
