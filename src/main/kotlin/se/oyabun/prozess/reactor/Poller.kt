@@ -78,9 +78,9 @@ interface Poller {
  * Standard [Poller] implementation that runs a polling loop on a single scheduler thread.
  *
  * Each tick calls [Poller.Poll.poll] and adds received records to an in-memory buffer.
- * When the buffer reaches [highWaterMark] the assigned partitions are paused; when it
- * drains below [lowWaterMark] they are resumed. This prevents the buffer from growing
- * without bound while downstream processing catches up.
+ * When the buffer reaches [highWaterMark] the assigned partitions are paused, preventing
+ * the buffer from growing without bound while downstream processing catches up.
+ * Partition resume is handled by [BufferedEmitter] when the buffer drains.
  *
  * The poll call is wrapped with [Retrying.withRetries] (infinite). Downstream failures
  * in the pipeline are handled by [retryStrategy] (default: exponential backoff,
@@ -92,7 +92,6 @@ interface Poller {
  * @param buffer      Shared buffer polled records are pushed into.
  * @param assignments Returns the current set of assigned partitions.
  * @param highWaterMark  Buffer size threshold that triggers partition pause.
- * @param lowWaterMark   Buffer size threshold that triggers partition resume.
  * @param instanceId     Label used in logging and scheduler thread names.
  * @param pollInterval   Interval between poll ticks.
  * @param shutdownSink   Signal sink to trigger clean pipeline termination.
@@ -106,7 +105,6 @@ internal class BufferedPoller(
     private val buffer: Queue<Received>,
     private val assignments: () -> Partitions,
     private val highWaterMark: Int,
-    private val lowWaterMark: Int,
     private val instanceId: String,
     private val pollInterval: Duration,
     private val shutdownSink: Sinks.One<Unit>,
@@ -174,16 +172,11 @@ internal class BufferedPoller(
         .concatMap { records ->
             records.forEach { buffer.add(it) }
             val current = assignments()
-            when {
-                buffer.size >= highWaterMark && current.isNotEmpty() -> {
-                    log.kafka.bufferSaturated(instanceId, current, buffer.size)
-                    pause.pause(current).thenReturn(records)
-                }
-                buffer.size < lowWaterMark && current.isNotEmpty() -> {
-                    log.kafka.bufferDrained(instanceId, current, buffer.size)
-                    resume.resume(current).thenReturn(records)
-                }
-                else -> just(records)
+            if (buffer.size >= highWaterMark && current.isNotEmpty()) {
+                log.kafka.bufferSaturated(instanceId, current, buffer.size)
+                pause.pause(current).thenReturn(records)
+            } else {
+                just(records)
             }
         }
         .flatMapIterable { it }
