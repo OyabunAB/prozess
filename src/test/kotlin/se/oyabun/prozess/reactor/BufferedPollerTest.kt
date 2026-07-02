@@ -35,7 +35,7 @@ class BufferedPollerTest {
         val topicPartition = Partition(0, Topic("test"))
         val assignments = java.util.concurrent.atomic.AtomicReference(setOf(topicPartition))
         val done = Sinks.one<Unit>()
-        val shutdown = Sinks.one<Unit>()
+        val shutdownSink = Sinks.one<Unit>()
 
         repeat(495) { buffer.add(received(topicPartition)) }
         pollQueue.addLast((1..10).map { received(topicPartition) })
@@ -50,7 +50,7 @@ class BufferedPollerTest {
             lowWaterMark = 125,
             instanceId = "test-poller",
             pollInterval = 10.milliseconds,
-            shutdown = shutdown.asMono(),
+            shutdownSink = shutdownSink,
             done = done,
             log = Logging.logger { },
             retryStrategy = Retry.max(1),
@@ -66,7 +66,7 @@ class BufferedPollerTest {
             assertTrue(resumeLatch.await(3, TimeUnit.SECONDS), "Expected resume on buffer drain")
             assertTrue(resumeCalls.isNotEmpty(), "Expected resume on buffer drain")
         } finally {
-            poller.stop()
+            poller.stop().block()
         }
     }
 
@@ -77,7 +77,7 @@ class BufferedPollerTest {
         try {
             assertThrows<PollerAlreadyRunning> { poller.start() }
         } finally {
-            poller.stop()
+            poller.stop().block()
         }
     }
 
@@ -96,14 +96,14 @@ class BufferedPollerTest {
     @Test
     fun `stop is idempotent when not running`() {
         val poller = createPoller()
-        poller.stop()
-        poller.stop()
+        poller.stop().block()
+        poller.stop().block()
     }
 
     @Test
     fun `signals done on pipeline completion`() {
         val done = Sinks.one<Unit>()
-        val shutdown = Sinks.one<Unit>()
+        val shutdownSink = Sinks.one<Unit>()
         val buffer = Queues.unbounded<Received>().get()
         val assignments = java.util.concurrent.atomic.AtomicReference(setOf(Partition(0, Topic("test"))))
 
@@ -117,17 +117,17 @@ class BufferedPollerTest {
             lowWaterMark = 250_000,
             instanceId = "test-done",
             pollInterval = 10.milliseconds,
-            shutdown = shutdown.asMono(),
+            shutdownSink = shutdownSink,
             done = done,
             log = Logging.logger { },
             retryStrategy = Retry.max(1),
         )
 
         poller.start()
-        shutdown.tryEmitValue(Unit)
+        shutdownSink.tryEmitValue(Unit)
         val signalled = done.asMono().timeout(3.seconds.toJavaDuration()).hasElement().block() ?: false
         assertTrue(signalled, "Expected done signal after shutdown")
-        poller.stop()
+        poller.stop().block()
     }
 
     @Test
@@ -135,7 +135,7 @@ class BufferedPollerTest {
         val attempts = AtomicInteger(0)
         val recoveryLatch = CountDownLatch(1)
         val done = Sinks.one<Unit>()
-        val shutdown = Sinks.one<Unit>()
+        val shutdownSink = Sinks.one<Unit>()
         val buffer = Queues.unbounded<Received>().get()
         val assigned = java.util.concurrent.atomic.AtomicReference(setOf(Partition(0, Topic("test"))))
 
@@ -153,7 +153,7 @@ class BufferedPollerTest {
             lowWaterMark = 250_000,
             instanceId = "test-retry",
             pollInterval = 10.milliseconds,
-            shutdown = shutdown.asMono(),
+            shutdownSink = shutdownSink,
             done = done,
             log = Logging.logger { },
             retryStrategy = Retry.fixedDelay(5, 10.milliseconds.toJavaDuration()),
@@ -162,7 +162,7 @@ class BufferedPollerTest {
         poller.start()
         assertTrue(recoveryLatch.await(3, TimeUnit.SECONDS), "Expected pipeline to retry and recover")
         assertTrue(attempts.get() > 2, "Expected pipeline to retry after errors, got ${attempts.get()}")
-        poller.stop()
+        poller.stop().block()
     }
 
     @Test
@@ -172,11 +172,26 @@ class BufferedPollerTest {
             assertTrue(!poller.isRunning, "Should not be running before start")
             poller.start()
             assertTrue(poller.isRunning, "Should be running after start")
-            poller.stop()
+            poller.stop().block()
             assertTrue(!poller.isRunning, "Should not be running after stop")
         } finally {
-            poller.stop()
+            poller.stop().block()
         }
+    }
+
+    @Test
+    fun `consecutive start stop cycles with fresh instances`() {
+        val p1 = createPoller()
+        p1.start()
+        assertTrue(p1.isRunning)
+        p1.stop().block()
+        assertTrue(!p1.isRunning)
+
+        val p2 = createPoller()
+        p2.start()
+        assertTrue(p2.isRunning)
+        p2.stop().block()
+        assertTrue(!p2.isRunning)
     }
 
     private fun createPoller(): BufferedPoller {
@@ -192,7 +207,7 @@ class BufferedPollerTest {
             lowWaterMark = 250_000,
             instanceId = "test",
             pollInterval = 100.milliseconds,
-            shutdown = Sinks.one<Unit>().asMono(),
+            shutdownSink = Sinks.one(),
             done = Sinks.one(),
             log = Logging.logger { },
             retryStrategy = Retry.max(1),

@@ -38,8 +38,13 @@ interface Poller {
     /** Start the polling loop. Throws [PollerAlreadyRunning] if already started. */
     fun start(): Disposable
 
-    /** Stop the polling loop and release the scheduler. Idempotent and safe to call after pipeline completion. */
-    fun stop()
+    /**
+     * Stop the polling loop and release the scheduler.
+     * Awaits graceful pipeline completion, then disposes.
+     * Returns a [Mono] that completes when cleanup is done.
+     * Idempotent and safe to call after pipeline completion.
+     */
+    fun stop(): Mono<Void>
 
     /** Pause all assigned partitions. Throws [PollerNotRunning] if not started. */
     fun pause()
@@ -90,7 +95,7 @@ interface Poller {
  * @param lowWaterMark   Buffer size threshold that triggers partition resume.
  * @param instanceId     Label used in logging and scheduler thread names.
  * @param pollInterval   Interval between poll ticks.
- * @param shutdown       Signal that triggers clean pipeline termination.
+ * @param shutdownSink   Signal sink to trigger clean pipeline termination.
  * @param done           Emitted when the pipeline completes (normal or error).
  * @param retryStrategy  Retry spec for pipeline-level errors (default: infinite backoff).
  */
@@ -104,7 +109,7 @@ internal class BufferedPoller(
     private val lowWaterMark: Int,
     private val instanceId: String,
     private val pollInterval: Duration,
-    private val shutdown: Mono<Unit>,
+    private val shutdownSink: Sinks.One<Unit>,
     private val done: Sinks.One<Unit>,
     private val log: Logger,
     private val retryStrategy: Retry = Retry.backoff(Long.MAX_VALUE, 500.milliseconds.toJavaDuration())
@@ -125,10 +130,20 @@ internal class BufferedPoller(
         return d
     }
 
-    override fun stop() {
-        disposable?.dispose()
-        timer.getAndSet(Schedulers.immediate()).dispose()
-        running.set(false)
+    override fun stop(): Mono<Void> {
+        if (!running.get()) {
+            disposable?.dispose()
+            timer.getAndSet(Schedulers.immediate()).dispose()
+            return Mono.empty()
+        }
+        shutdownSink.tryEmitValue(Unit)
+        return done.asMono()
+            .doFinally {
+                disposable?.dispose()
+                timer.getAndSet(Schedulers.immediate()).dispose()
+                running.set(false)
+            }
+            .then()
     }
 
     override fun pause() {
@@ -173,7 +188,7 @@ internal class BufferedPoller(
         }
         .flatMapIterable { it }
         .retryWhen(retryStrategy)
-        .takeUntilOther(shutdown)
+        .takeUntilOther(shutdownSink.asMono())
         .subscribe(
             {},
             { signalCompletion(it) },
