@@ -49,7 +49,7 @@ class KafkaTests {
             val published = publish(bootstrapServers, topic, count = count)
             val received = mutableListOf<String>()
             val latch = CountDownLatch(count)
-            val config = ConsumerConfig(bootstrapServers, groupId, topic)
+            val config = ConsumerConfig(bootstrapServers, groupId, setOf(topic))
             val consumer = stringConsumer(config) { _, message ->
                 received.add(message)
                 latch.countDown()
