@@ -25,11 +25,9 @@ import kotlin.time.toJavaDuration
 class BufferedPollerTest {
 
     @Test
-    fun `pauses on buffer saturation and resumes on drain`() {
+    fun `pauses on buffer saturation`() {
         val pauseLatch = CountDownLatch(1)
-        val resumeLatch = CountDownLatch(1)
         val pauseCalls = mutableListOf<Partitions>()
-        val resumeCalls = mutableListOf<Partitions>()
         val pollQueue = java.util.ArrayDeque<List<Received>>()
         val buffer = Queues.unbounded<Received>().get()
         val topicPartition = Partition(0, Topic("test"))
@@ -43,11 +41,10 @@ class BufferedPollerTest {
         val poller = BufferedPoller(
             poll = Poller.Poll { Mono.just(pollQueue.pollFirst() ?: emptyList()) },
             pause = Poller.Pause { p -> pauseCalls.add(p); pauseLatch.countDown(); Mono.just(p) },
-            resume = Poller.Resume { p -> resumeCalls.add(p); resumeLatch.countDown(); Mono.just(p) },
+            resume = Poller.Resume { Mono.just(it) },
             buffer = buffer,
             assignments = { assignments.get() },
             highWaterMark = 500,
-            lowWaterMark = 125,
             instanceId = "test-poller",
             pollInterval = 10.milliseconds,
             shutdownSink = shutdownSink,
@@ -58,13 +55,8 @@ class BufferedPollerTest {
 
         try {
             poller.start()
-
             assertTrue(pauseLatch.await(3, TimeUnit.SECONDS), "Expected pause on buffer saturation")
             assertTrue(pauseCalls.isNotEmpty(), "Expected pause on buffer saturation")
-
-            buffer.clear()
-            assertTrue(resumeLatch.await(3, TimeUnit.SECONDS), "Expected resume on buffer drain")
-            assertTrue(resumeCalls.isNotEmpty(), "Expected resume on buffer drain")
         } finally {
             poller.stop().block()
         }
@@ -114,7 +106,6 @@ class BufferedPollerTest {
             buffer = buffer,
             assignments = { assignments.get() },
             highWaterMark = 1_000_000,
-            lowWaterMark = 250_000,
             instanceId = "test-done",
             pollInterval = 10.milliseconds,
             shutdownSink = shutdownSink,
@@ -150,7 +141,6 @@ class BufferedPollerTest {
                 else { recoveryLatch.countDown(); assigned.get() }
             },
             highWaterMark = 1_000_000,
-            lowWaterMark = 250_000,
             instanceId = "test-retry",
             pollInterval = 10.milliseconds,
             shutdownSink = shutdownSink,
@@ -204,7 +194,6 @@ class BufferedPollerTest {
             buffer = buffer,
             assignments = { assignments.get() },
             highWaterMark = 1_000_000,
-            lowWaterMark = 250_000,
             instanceId = "test",
             pollInterval = 100.milliseconds,
             shutdownSink = Sinks.one(),
