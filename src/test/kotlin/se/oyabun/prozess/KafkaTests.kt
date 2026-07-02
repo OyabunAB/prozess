@@ -149,10 +149,10 @@ class KafkaTests {
                 secondLatch.countDown()
             }
             secondConsumer.start(from = StartOffset.Earliest)
-            val replayed = !secondLatch.await(3, TimeUnit.SECONDS)
+            val noReplay = !secondLatch.await(3, TimeUnit.SECONDS)
             secondConsumer.shutdown()
 
-            assertTrue(replayed, "restart replayed ${second.size} messages — offsets were lost")
+            assertTrue(noReplay, "restart replayed ${second.size} messages — offsets were lost")
         }
     }
 
