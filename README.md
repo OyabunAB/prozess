@@ -7,12 +7,12 @@ Reactive Kafka consumer/producer built on Reactor and kotlinx-coroutines.
 The consumer is split into three independent pipelines that share an in-memory buffer:
 
 ```
-  Poller (polling pipeline)     Emitter (emitting pipeline)     Committer (committing pipeline)
+  Poller (polling pipeline)     Emitter (emitting pipeline)     Committer (commit pipeline)
   ┌─────────────────────┐       ┌──────────────────────┐        ┌──────────────────────────┐
-  │ Flux.interval       │       │ Flux.interval        │        │ processed.asFlux()       │
+  │ Flux.interval       │       │ Flux.interval        │        │ Sinks.Many<Position>     │
   │  → client.poll()    │       │  → buffer.poll()     │        │  → bufferTimeout()       │
   │  → buffer.add()     │──buf→│  → emitter.next()     │──pos──→│  → client.commit()       │
-  │  → pause/resume     │       │                      │        │                          │
+  │  → pause/resume     │       │                      │        │  → flushForPartitions()  │
   └─────────────────────┘       └──────────────────────┘        └──────────────────────────┘
 ```
 
@@ -59,7 +59,7 @@ The Poller (`BufferedPoller`) owns the poll loop and buffer back-pressure. It ru
 | 6 | Graceful shutdown | `shutdown` Mono emits | `takeUntilOther` completes the Flux, subscriber completion handler fires `done` signal |
 | 7 | Poll error | `poll.poll()` throws | `withRetries` (infinite, fixed 3s delay) retries the Mono before it reaches the pipeline |
 | 8 | Pipeline error | Downstream operator throws (e.g. `assignments()` lambda) | `retryWhen` with exponential backoff (500ms initial, 30s max, infinite attempts) re-subscribes the chain |
-| 9 | stop() after completion | Consumer `doFinally` calls `stop()` | Disposes the subscription and scheduler. `signalCompletion` already set `running = false`. `stop()` is idempotent — second call disposes `Schedulers.immediate()` (no-op) |
+| 9 | stop() after completion | Consumer calls `stop()` | Fires internal `shutdownSink` (triggers `takeUntilOther`), awaits `done` signal, then disposes subscription and scheduler. Idempotent — if already stopped, returns `Mono.empty()` immediately |
 | 10 | Double start | `start()` while running | Throws `PollerAlreadyRunning` |
 
 #### Back-pressure
@@ -73,7 +73,7 @@ This prevents the buffer from growing unbounded while downstream processing catc
 #### Thread Safety
 
 - `running` flag uses `AtomicBoolean` — `start()`/`stop()` are safe to call from different threads
-- `stop()` unconditionally disposes the scheduler via `getAndSet(immediate)` — safe to call after pipeline completion or while a concurrent `start()` is in progress
+- `stop()` fires `shutdownSink`, awaits `done` via `done.asMono()`, then disposes subscription and scheduler in `doFinally` — safe to call after pipeline completion (returns `Mono.empty()` if already stopped)
 - `pause()`/`resume()` check `running` before calling the SAM operation — the SAM operation itself is not thread-safe, but it runs on the caller's thread (typically the consumer thread), and the underlying Kafka client serialises access via its own single-thread scheduler
 - The `disposable` field is null-safe: `?.dispose()` is idempotent
 
@@ -88,12 +88,17 @@ The emitter drains the shared buffer and pushes records into the reactive `FluxS
 
 ### Committer
 
-The committer collects processed positions and commits offsets to Kafka.
+The Committer (`BufferedCommitter`) owns the committed offsets state and runs a buffered commit pipeline on its own scheduler thread.
 
-- Reads from a `Sinks.Many<Position>` fed by the processing stage
+- Accepts positions via `markProcessed(position)` — updates `processedOffsets` atomically and feeds an internal `Sinks.Many<Position>`
 - Batches positions with `bufferTimeout(25, 1s)` and commits the highest offset per partition
-- Retries commits indefinitely on failure
-- Does not interact with the Poller or the shared buffer
+- Filters out unassigned partitions before committing (avoids committing offsets for partitions the consumer no longer owns)
+- `flushForPartitions(partitions)` performs an immediate synchronous commit for revoked partitions — used in the rebalance callback to ensure offsets are saved before another consumer takes over
+- `seedOffsets(offsets)` pre-populates offsets without going through the position pipeline (catch-up completion)
+- Exposes `positions: Flux<Position>` for external subscribers (completion detection)
+- `stop(): Mono<Void>` fires `tryEmitComplete()` on the internal sink, awaits pipeline drain, then disposes the scheduler — matches the Poller lifecycle pattern
+- Retries commits indefinitely on transient failures; the outer `retryWhen` restarts the pipeline on unexpected errors
+- Owns `processedOffsets` state — no longer managed by ReactorKafkaConsumer
 
 ## Producer Architecture
 

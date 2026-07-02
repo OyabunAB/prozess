@@ -66,7 +66,6 @@ class ReactorKafkaConsumer<M>(
     private val assignments = AtomicReference<Partitions>(emptySet())
     private val ends = AtomicReference<Positions>(emptySet())
     private val started = AtomicBoolean(false)
-    private val processedOffsets = AtomicReference<Offsets>(emptyMap())
     private val highWaterMark = config.maxPollRecords
     private val lowWaterMark = config.maxPollRecords / 4
     private val pendingSeeks = AtomicReference<Offsets?>(null)
@@ -75,33 +74,29 @@ class ReactorKafkaConsumer<M>(
     private val disposed = java.util.concurrent.atomic.AtomicBoolean(false)
     private var shutdownDone = Sinks.one<Unit>()
     private var subscription: Disposable? = null
-    private var processedSink: Sinks.Many<Position>? = null
+    private var committer: Committer? = null
     private var pipelinesActive = java.util.concurrent.atomic.AtomicBoolean(false)
     private var shutdownSignal = Sinks.one<Unit>()
-    private var pollingDone = Sinks.one<Unit>()
     private var emittingDone = Sinks.one<Unit>()
-    private var committingDone = Sinks.one<Unit>()
-    private val commitScheduler = java.util.concurrent.atomic.AtomicReference(Schedulers.immediate())
     private val emitScheduler = java.util.concurrent.atomic.AtomicReference(Schedulers.immediate())
     private var poller: Poller? = null
 
     private val shutdownTask: Mono<Void> = Mono.defer {
         if (!disposed.get()) Mono.empty()
-        else fromCallable { client.wakeup() }
-            .then(Mono.fromRunnable { closeSignal.tryEmitEmpty() })
-            .then(Mono.fromRunnable { shutdownSignal.tryEmitValue(Unit) })
+        else fromCallable {
+                client.wakeup()
+                closeSignal.tryEmitEmpty()
+                shutdownSignal.tryEmitValue(Unit)
+            }
             .then(
                 if (pipelinesActive.get())
-                    Mono.`when`(pollingDone.asMono(), emittingDone.asMono())
-                        .then(Mono.fromRunnable { processedSink?.tryEmitComplete() })
-                        .then(committingDone.asMono())
+                    Mono.`when`(poller?.stop() ?: empty<Void>(), emittingDone.asMono())
+                        .then(committer?.stop() ?: empty())
                 else Mono.empty()
             )
             .then(client.close())
             .doFinally {
-                commitScheduler.get().dispose()
                 emitScheduler.get().dispose()
-                poller?.stop()
             }
     }.cache()
 
@@ -110,12 +105,10 @@ class ReactorKafkaConsumer<M>(
         until: EndOffset = EndOffset.Continuous,
     ) {
         check(started.compareAndSet(false, true)) { "$instanceId start() called more than once" }
-        val processed = Sinks.many().multicast().onBackpressureBuffer<Position>(config.maxPollRecords)
-        processedSink = processed
-        val complete = completionSignal(processed)
+        val complete = completionSignal()
         val sync = syncSignal(until, complete)
         shutdownDone = Sinks.one()
-        subscription = incomingFeed(processed, sync, closeSignal.asMono(), from, until)
+        subscription = incomingFeed(sync, closeSignal.asMono(), from, until)
             .groupBy { it.position.partition }
             .flatMap { partition ->
                 partition.concatMap { received ->
@@ -123,7 +116,7 @@ class ReactorKafkaConsumer<M>(
                     else just(received.position)
                 }
             }
-            .flatMap { position -> emitProcessed(processed, position) }
+            .flatMap { position -> committer?.markProcessed(position) ?: just(position) }
             .subscribe()
     }
 
@@ -152,7 +145,6 @@ class ReactorKafkaConsumer<M>(
     }
 
     private fun incomingFeed(
-        processed: Sinks.Many<Position>,
         sync: Mono<Received>,
         closeSignal: Mono<Unit>,
         from: StartOffset,
@@ -164,7 +156,7 @@ class ReactorKafkaConsumer<M>(
                 onRevoked = { onPartitionsRevoked(this, it) },
                 onAssigned = { onPartitionsAssigned(this, it) },
             )
-            val messages = messagesFeed(processed, topicPartitions, sync)
+            val messages = messagesFeed(topicPartitions, sync)
             val synchronizedMessages = Flux.merge(messages, sync)
             initOffsets(topicPartitions, from, until)
                 .then(awaitSubscription)
@@ -232,23 +224,6 @@ class ReactorKafkaConsumer<M>(
         }
     }
 
-    private fun emitProcessed(sink: Sinks.Many<Position>, position: Position): Mono<Position> =
-        defer {
-            val result = sink.tryEmitNext(position)
-            when {
-                result === Sinks.EmitResult.OK -> just(position)
-                result === Sinks.EmitResult.FAIL_TERMINATED || result === Sinks.EmitResult.FAIL_CANCELLED -> just(position)
-                result === Sinks.EmitResult.FAIL_OVERFLOW -> {
-                    if (disposed.get()) just(position)
-                    else {
-                        log.kafka.commitBackpressure(instanceId, position.partition)
-                        delay(100.milliseconds.toJavaDuration()).then(emitProcessed(sink, position))
-                    }
-                }
-                else -> error(RuntimeException("$instanceId failed to emit position $position to processed sink: $result"))
-            }
-        }
-
     private fun processRetrying(received: Received, attempt: Long = 0): Mono<Position> =
         fromCallable { deserializer.invoke(received.message) }
             .map { process(received, it); received.position }
@@ -264,15 +239,7 @@ class ReactorKafkaConsumer<M>(
 
     private fun onPartitionsRevoked(context: RebalanceContext, domain: Partitions) {
         log.kafka.revoked(instanceId, domain)
-        val current = processedOffsets.load()
-        val revokedOffsets = domain.mapNotNull { p ->
-            val offset = current[p]
-            if (offset != null) p to offset else null
-        }.toMap()
-        if (revokedOffsets.isNotEmpty()) {
-            context.commit(revokedOffsets)
-            log.kafka.committed(instanceId, domain)
-        }
+        committer?.flushForPartitions(domain)?.block()
         assignments.update { it - domain }
     }
 
@@ -290,21 +257,17 @@ class ReactorKafkaConsumer<M>(
             if (endPos != null && context.position(p) > endPos.offset) p to (endPos.offset + 1)
             else null
         }.toMap()
-        if (done.isNotEmpty()) processedOffsets.update { it + done }
+        if (done.isNotEmpty()) committer?.seedOffsets(done)
     }
 
-    private fun completionSignal(processed: Sinks.Many<Position>): Mono<Void> = processed.asFlux()
-        .map { position ->
-            processedOffsets.update { current ->
-                val offset = maxOf(current[position.partition] ?: 0L, position.offset + 1)
-                current + (position.partition to offset)
-            }
+    private fun completionSignal(): Mono<Void> = committer?.positions
+        ?.map {
             assignments.load().all { partition ->
                 val lastPosition = ends.load().find { it.partition == partition }
-                lastPosition == null || (processedOffsets.load()[partition] ?: 0L) >= lastPosition.offset
+                lastPosition == null || (committer?.processedOffsets?.get(partition) ?: 0L) >= lastPosition.offset
             }
         }
-        .filter { it }.next().then().cache()
+        ?.filter { it }?.next()?.then()?.cache() ?: never()
 
     private fun syncSignal(until: EndOffset, complete: Mono<Void>): Mono<Received> = when (until) {
         is CatchUp -> empty<Received>().delaySubscription(complete)
@@ -312,19 +275,27 @@ class ReactorKafkaConsumer<M>(
     }
 
     private fun messagesFeed(
-        processed: Sinks.Many<Position>,
         topicPartitions: Partitions,
         sync: Mono<Received>,
     ): Flux<Received> = Flux.create { emitter: FluxSink<Received> ->
         val buffer = Queues.unbounded<Received>().get()
         shutdownSignal = Sinks.one()
-        pollingDone = Sinks.one()
+        val pollingDone = Sinks.one<Unit>()
         emittingDone = Sinks.one()
-        committingDone = Sinks.one()
-        commitScheduler.set(Schedulers.newSingle("$instanceId-$COMMIT_PIPELINE"))
         emitScheduler.set(Schedulers.newSingle("$instanceId-$EMITTER"))
         pipelinesActive.set(true)
-        committingPipeline(processed, topicPartitions, committingDone, scheduler = commitScheduler.get())
+
+        val c = BufferedCommitter(
+            commit = Committer.Commit { offsets -> client.commit(offsets, "$instanceId@${Clock.System.now()}") },
+            assignments = { assignments.load() },
+            instanceId = instanceId,
+            topicPartitions = topicPartitions,
+            log = log,
+            bufferSize = config.maxPollRecords,
+        )
+        c.start()
+        committer = c
+
         emittingPipeline(buffer, emitter, shutdownSignal.asMono(), emittingDone, timer = emitScheduler.get())
         poller = BufferedPoller(
             poll = Poller.Poll { client.poll() },
@@ -336,50 +307,16 @@ class ReactorKafkaConsumer<M>(
             lowWaterMark = lowWaterMark,
             instanceId = instanceId,
             pollInterval = config.pollInterval,
-            shutdown = shutdownSignal.asMono(),
+            shutdownSink = shutdownSignal,
             done = pollingDone,
             log = log,
         )
         poller?.start()
         emitter.onDispose {
             shutdownSignal.tryEmitValue(Unit)
-            processed.tryEmitComplete()
             shutdownDone.tryEmitEmpty()
         }
     }.takeUntilOther(sync)
-
-    private fun committingPipeline(
-        processed: Sinks.Many<Position>,
-        topicPartitions: Partitions,
-        done: Sinks.One<Unit>,
-        component: String = "$instanceId-$COMMIT_PIPELINE",
-        maxSize: Int = 25,
-        maxTime: java.time.Duration = 1.seconds.toJavaDuration(),
-        scheduler: Scheduler = Schedulers.newSingle(component),
-    ): Disposable = processed.asFlux()
-        .bufferTimeout(maxSize, maxTime)
-        .publishOn(scheduler)
-        .concatMap { batch ->
-            val assigned = assignments.load()
-            val current = batch.filter { it.partition in assigned }
-            if (current.isEmpty()) empty()
-            else {
-                val meta = "$instanceId@${Clock.System.now()}"
-                val offsets = current.groupBy({ it.partition }, { it.offset })
-                val latest = offsets.mapValues { it.value.max() + 1 }
-                client.commit(latest, meta)
-                    .doOnError { cause -> log.kafka.commitFailed(instanceId, topicPartitions, cause) }
-                    .doOnSuccess { log.kafka.committed(instanceId, topicPartitions) }
-                    .withRetries(id = instanceId, retryOn = anyException, maxAttempts = infiniteRetries)
-                }
-        }
-        .retryWhen(restartIndefinitely(component))
-        .ignoreElements()
-        .subscribe(
-            {},
-            { signalCompletion(done, component, it) },
-            { signalCompletion(done, component) },
-        )
 
     private fun emittingPipeline(
         buffer: Queue<Received>,
@@ -427,8 +364,6 @@ class ReactorKafkaConsumer<M>(
 
     companion object {
         const val EMITTER = "emitter"
-        const val COMMIT_PIPELINE = "commit pipeline"
-        const val POLL_LOOP = "poll loop"
 
         private fun backoff(attempt: Long): java.time.Duration =
             minOf(30.seconds, 1.seconds * (1 shl attempt.toInt().coerceAtMost(30))).toJavaDuration()
