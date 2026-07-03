@@ -57,15 +57,14 @@ internal class ThreadsafeKafkaClient(config: ConsumerConfig) {
 
     fun subscribe(
         topics: Topics,
-        onRevoked: PollContext.(Partitions) -> Unit,
-        onAssigned: PollContext.(Partitions) -> Unit,
+        rebalanceHandler: RebalanceHandler,
     ): Mono<Topics> = fromCallable {
         val access = PollContext(delegate)
         delegate.subscribe(topics, object : ConsumerRebalanceListener {
             override fun onPartitionsRevoked(partitions: Collection<TopicPartition>) =
-                access.onRevoked(access.toPartitions(partitions))
+                rebalanceHandler.onPartitionsRevoked(access, access.toPartitions(partitions))
             override fun onPartitionsAssigned(partitions: Collection<TopicPartition>) =
-                access.onAssigned(access.toPartitions(partitions))
+                rebalanceHandler.onPartitionsAssigned(access, access.toPartitions(partitions))
         })
         topics
     }.subscribeOn(scheduler)
