@@ -1,4 +1,4 @@
-package se.oyabun.prozess.reactor
+package se.oyabun.prozess
 
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono

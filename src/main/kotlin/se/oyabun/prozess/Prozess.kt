@@ -1,7 +1,7 @@
 package se.oyabun.prozess
 
-import se.oyabun.prozess.reactor.ReactorKafkaConsumer
-import se.oyabun.prozess.reactor.ReactorKafkaProducer
+import se.oyabun.prozess.StreamingConsumer
+import se.oyabun.prozess.StreamingProducer
 
 object Prozess {
     typealias KeyExtraction<M> = (M) -> String
@@ -38,7 +38,7 @@ object Prozess {
         process: ConsumerProcess<M> = { _,_ -> },
         instance: String? = "consumer",
     ): Consumer<M> = object : Consumer<M> {
-        private val delegate = ReactorKafkaConsumer(config, filter, deserializer, process, instance)
+        private val delegate = StreamingConsumer(config, filter, deserializer, process, instance)
         override fun start(from: StartOffset, until: EndOffset) = delegate.start(from, until)
         override fun shutdown() = delegate.shutdown()
         override val isDisposed: Boolean get() = delegate.isDisposed
@@ -54,7 +54,7 @@ object Prozess {
         serializer: Serializer<M>,
         instance: String? = "producer",
     ): Producer<M> = object : Producer<M> {
-        val delegate = ReactorKafkaProducer(config, instance, serializer)
+        val delegate = StreamingProducer(config, instance, serializer)
         override fun send(key: String, value: M, partition: Int?, timestamp: Long?): Long { return delegate.send(key, value, partition, timestamp).blockOptional().orElseThrow() }
         override fun sendOffsetsToTransaction(offsets: Offsets, member: GroupMember) { delegate.sendOffsetsToTransaction(offsets, member).block() }
         override fun initTransactions() { delegate.initTransactions().block() }

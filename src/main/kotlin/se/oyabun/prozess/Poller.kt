@@ -1,4 +1,4 @@
-package se.oyabun.prozess.reactor
+package se.oyabun.prozess
 
 import reactor.core.Disposable
 import reactor.core.publisher.Flux
@@ -13,10 +13,10 @@ import se.oyabun.prozess.Partitions
 import se.oyabun.prozess.PollerAlreadyRunning
 import se.oyabun.prozess.PollerNotRunning
 import se.oyabun.prozess.Received
-import se.oyabun.prozess.reactor.Retrying.anyException
-import se.oyabun.prozess.reactor.Retrying.infiniteRetries
-import se.oyabun.prozess.reactor.Retrying.withRetries
-import java.util.Queue
+import se.oyabun.prozess.Retrying.anyException
+import se.oyabun.prozess.Retrying.infiniteRetries
+import se.oyabun.prozess.Retrying.withRetries
+import se.oyabun.prozess.ReceivedBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.time.Duration
@@ -27,84 +27,40 @@ import kotlin.time.toJavaDuration
 /**
  * Polls a Kafka consumer on a single thread and pushes [Received] records into a shared buffer.
  *
- * Owns pause/resume of assigned partitions when the buffer is saturated or drained,
- * providing back-pressure between poll and process stages.
- *
  * Lifecycle: [start] → running → [stop] (or pipeline completes via [shutdown] signal).
  * [pause]/[resume] control the underlying Kafka consumer partition assignment state.
+ * The buffer watermark back-pressure is owned by [InMemoryReceivedBuffer].
  */
 interface Poller {
 
-    /** Start the polling loop. Throws [PollerAlreadyRunning] if already started. */
     fun start(): Disposable
-
-    /**
-     * Stop the polling loop and release the scheduler.
-     * Awaits graceful pipeline completion, then disposes.
-     * Returns a [Mono] that completes when cleanup is done.
-     * Idempotent and safe to call after pipeline completion.
-     */
     fun stop(): Mono<Void>
-
-    /** Pause all assigned partitions. Throws [PollerNotRunning] if not started. */
     fun pause()
-
-    /** Resume all assigned partitions. Throws [PollerNotRunning] if not started. */
     fun resume()
-
-    /** True while the polling loop is active. Becomes false after [stop] or pipeline completion. */
     val isRunning: Boolean
 
     /** SAM interface for the poll operation. */
     fun interface Poll {
-        /** Returns a batch of polled [Received] records. */
         fun poll(): Mono<List<Received>>
     }
 
     /** SAM interface for the partition pause operation. */
     fun interface Pause {
-        /** Pause consumption from the given partitions. */
         fun pause(partitions: Partitions): Mono<Partitions>
     }
 
     /** SAM interface for the partition resume operation. */
     fun interface Resume {
-        /** Resume consumption from the given partitions. */
         fun resume(partitions: Partitions): Mono<Partitions>
     }
 }
 
-/**
- * Standard [Poller] implementation that runs a polling loop on a single scheduler thread.
- *
- * Each tick calls [Poller.Poll.poll] and adds received records to an in-memory buffer.
- * When the buffer reaches [highWaterMark] the assigned partitions are paused, preventing
- * the buffer from growing without bound while downstream processing catches up.
- * Partition resume is handled by [BufferedEmitter] when the buffer drains.
- *
- * The poll call is wrapped with [Retrying.withRetries] (infinite). Downstream failures
- * in the pipeline are handled by [retryStrategy] (default: exponential backoff,
- * Long.MAX_VALUE attempts). The pipeline terminates cleanly when [shutdown] emits.
- *
- * @param poll        Polls the Kafka consumer.
- * @param pause       Pauses assigned partitions.
- * @param resume      Resumes assigned partitions.
- * @param buffer      Shared buffer polled records are pushed into.
- * @param assignments Returns the current set of assigned partitions.
- * @param highWaterMark  Buffer size threshold that triggers partition pause.
- * @param instanceId     Label used in logging and scheduler thread names.
- * @param pollInterval   Interval between poll ticks.
- * @param shutdownSink   Signal sink to trigger clean pipeline termination.
- * @param done           Emitted when the pipeline completes (normal or error).
- * @param retryStrategy  Retry spec for pipeline-level errors (default: infinite backoff).
- */
 internal class BufferedPoller(
     private val poll: Poller.Poll,
     private val pause: Poller.Pause,
     private val resume: Poller.Resume,
-    private val buffer: Queue<Received>,
+    private val buffer: ReceivedBuffer,
     private val assignments: () -> Partitions,
-    private val highWaterMark: Int,
     private val instanceId: String,
     private val pollInterval: Duration,
     private val shutdownSink: Sinks.One<Unit>,
@@ -170,14 +126,8 @@ internal class BufferedPoller(
         }
         .doOnNext { records -> if (records.isNotEmpty()) log.kafka.polled(instanceId, records.size) }
         .concatMap { records ->
-            records.forEach { buffer.add(it) }
-            val current = assignments()
-            if (buffer.size >= highWaterMark && current.isNotEmpty()) {
-                log.kafka.bufferSaturated(instanceId, current, buffer.size)
-                pause.pause(current).thenReturn(records)
-            } else {
-                just(records)
-            }
+            records.forEach { buffer.offer(it) }
+            just(records)
         }
         .flatMapIterable { it }
         .retryWhen(retryStrategy)

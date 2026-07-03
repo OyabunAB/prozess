@@ -1,4 +1,4 @@
-package se.oyabun.prozess.reactor
+package se.oyabun.prozess
 
 import se.oyabun.prozess.GroupMember
 import se.oyabun.prozess.Logging
@@ -6,9 +6,9 @@ import se.oyabun.prozess.Offsets
 import se.oyabun.prozess.ProducerConfig
 import se.oyabun.prozess.Prozess.KeyExtraction
 import se.oyabun.prozess.Prozess.Serializer
-import se.oyabun.prozess.reactor.Retrying.anyException
-import se.oyabun.prozess.reactor.Retrying.infiniteRetries
-import se.oyabun.prozess.reactor.Retrying.withRetries
+import se.oyabun.prozess.Retrying.anyException
+import se.oyabun.prozess.Retrying.infiniteRetries
+import se.oyabun.prozess.Retrying.withRetries
 import org.apache.kafka.clients.consumer.OffsetAndMetadata
 import org.apache.kafka.clients.producer.KafkaProducer
 import org.apache.kafka.common.TopicPartition
@@ -16,7 +16,7 @@ import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 import reactor.core.scheduler.Schedulers
 
-class ReactorKafkaProducer<M : Any>(
+class StreamingProducer<M : Any>(
     val config: ProducerConfig,
     instance: String? = "producer",
     private val serializer: Serializer<M>,

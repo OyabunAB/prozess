@@ -1,12 +1,12 @@
-package se.oyabun.prozess.reactor
+package se.oyabun.prozess
 
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import reactor.core.publisher.Mono
 import reactor.core.publisher.Sinks
-import reactor.util.concurrent.Queues
 import reactor.util.retry.Retry
 import se.oyabun.prozess.EmitterAlreadyRunning
+import se.oyabun.prozess.InMemoryReceivedBuffer
 import se.oyabun.prozess.Logging
 import se.oyabun.prozess.Partition
 import se.oyabun.prozess.Position
@@ -16,7 +16,6 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -32,10 +31,9 @@ class EmitterTest {
 
     @Test
     fun `emits records from buffer when downstream has demand`() {
-        val buffer = Queues.unbounded<Received>().get()
+        val buffer = InMemoryReceivedBuffer()
         val emitted = ConcurrentLinkedQueue<Received>()
         val assignments = java.util.concurrent.atomic.AtomicReference(setOf(p0))
-        val demand = AtomicLong(5)
         val shutdownSink = Sinks.one<Unit>()
         val done = Sinks.one<Unit>()
         val emitLatch = CountDownLatch(3)
@@ -46,22 +44,18 @@ class EmitterTest {
                 emitLatch.countDown()
                 Mono.just(received)
             },
-            resume = Emitter.Resume { Mono.just(it) },
             buffer = buffer,
             assignments = { assignments.get() },
-            requestedFromDownstream = { demand.get() },
-            lowWaterMark = 10,
             instanceId = "test-demand",
             shutdownSink = shutdownSink,
             done = done,
             log = Logging.logger { },
-            period = 10.milliseconds,
             retryStrategy = Retry.max(1),
         )
 
-        buffer.add(received(p0, 0L))
-        buffer.add(received(p0, 1L))
-        buffer.add(received(p0, 2L))
+        buffer.offer(received(p0, 0L))
+        buffer.offer(received(p0, 1L))
+        buffer.offer(received(p0, 2L))
 
         try {
             e.start()
@@ -73,96 +67,13 @@ class EmitterTest {
     }
 
     @Test
-    fun `does not emit when downstream has no demand`() {
-        val buffer = Queues.unbounded<Received>().get()
+    fun `emits records via reactive drain`() {
+        val buffer = InMemoryReceivedBuffer()
         val emitted = ConcurrentLinkedQueue<Received>()
         val assignments = java.util.concurrent.atomic.AtomicReference(setOf(p0))
-        val demand = AtomicLong(0)
         val shutdownSink = Sinks.one<Unit>()
         val done = Sinks.one<Unit>()
-
-        val e = BufferedEmitter(
-            emit = Emitter.Emit { received ->
-                emitted.add(received)
-                Mono.just(received)
-            },
-            resume = Emitter.Resume { Mono.just(it) },
-            buffer = buffer,
-            assignments = { assignments.get() },
-            requestedFromDownstream = { demand.get() },
-            lowWaterMark = 10,
-            instanceId = "test-no-demand",
-            shutdownSink = shutdownSink,
-            done = done,
-            log = Logging.logger { },
-            period = 10.milliseconds,
-            retryStrategy = Retry.max(1),
-        )
-
-        buffer.add(received(p0, 0L))
-        buffer.add(received(p0, 1L))
-
-        try {
-            e.start()
-            Thread.sleep(300)
-            assertTrue(emitted.isEmpty(), "Expected no emits when demand is 0")
-        } finally {
-            e.stop().block()
-        }
-    }
-
-    @Test
-    fun `resumes partitions when buffer falls below lowWaterMark`() {
-        val buffer = Queues.unbounded<Received>().get()
-        val resumeCalls = mutableListOf<se.oyabun.prozess.Partitions>()
-        val resumeLatch = CountDownLatch(1)
-        val assignments = java.util.concurrent.atomic.AtomicReference(setOf(p0))
-        val demand = AtomicLong(10)
-        val shutdownSink = Sinks.one<Unit>()
-        val done = Sinks.one<Unit>()
-
-        repeat(15) { buffer.add(received(p0, it.toLong())) }
-
-        val e = BufferedEmitter(
-            emit = Emitter.Emit { Mono.just(it) },
-            resume = Emitter.Resume { p ->
-                resumeCalls.add(p)
-                resumeLatch.countDown()
-                Mono.just(p)
-            },
-            buffer = buffer,
-            assignments = { assignments.get() },
-            requestedFromDownstream = { demand.get() },
-            lowWaterMark = 10,
-            instanceId = "test-resume",
-            shutdownSink = shutdownSink,
-            done = done,
-            log = Logging.logger { },
-            period = 10.milliseconds,
-            retryStrategy = Retry.max(1),
-        )
-
-        try {
-            e.start()
-            assertTrue(resumeLatch.await(3, TimeUnit.SECONDS), "Expected resume when buffer < lowWaterMark")
-            assertTrue(resumeCalls.isNotEmpty(), "Expected at least one resume call")
-        } finally {
-            e.stop().block()
-        }
-    }
-
-    @Test
-    fun `does not emit records from unassigned partitions`() {
-        val buffer = Queues.unbounded<Received>().get()
-        val emitted = ConcurrentLinkedQueue<Received>()
-        val assignments = java.util.concurrent.atomic.AtomicReference(setOf(p0))
-        val demand = AtomicLong(10)
-        val shutdownSink = Sinks.one<Unit>()
-        val done = Sinks.one<Unit>()
-        val emitLatch = CountDownLatch(1)
-
-        buffer.add(received(p1, 0L))
-        buffer.add(received(p0, 1L))
+        val emitLatch = CountDownLatch(2)
 
         val e = BufferedEmitter(
             emit = Emitter.Emit { received ->
@@ -170,16 +81,85 @@ class EmitterTest {
                 emitLatch.countDown()
                 Mono.just(received)
             },
-            resume = Emitter.Resume { Mono.just(it) },
             buffer = buffer,
             assignments = { assignments.get() },
-            requestedFromDownstream = { demand.get() },
+            instanceId = "test-drain",
+            shutdownSink = shutdownSink,
+            done = done,
+            log = Logging.logger { },
+            retryStrategy = Retry.max(1),
+        )
+
+        buffer.offer(received(p0, 0L))
+        buffer.offer(received(p0, 1L))
+
+        try {
+            e.start()
+            assertTrue(emitLatch.await(3, TimeUnit.SECONDS), "Expected 2 emits via reactive drain")
+            assertEquals(2, emitted.size)
+        } finally {
+            e.stop().block()
+        }
+    }
+
+    @Test
+    fun `resumes partitions when buffer falls below lowWaterMark`() {
+        val resumeLatch = CountDownLatch(1)
+        val assignments = java.util.concurrent.atomic.AtomicReference(setOf(p0))
+        val shutdownSink = Sinks.one<Unit>()
+        val done = Sinks.one<Unit>()
+
+        val buffer = InMemoryReceivedBuffer(
+            highWaterMark = 10,
             lowWaterMark = 10,
+            onResume = { resumeLatch.countDown() },
+        )
+
+        repeat(15) { buffer.offer(received(p0, it.toLong())) }
+
+        val e = BufferedEmitter(
+            emit = Emitter.Emit { Mono.just(it) },
+            buffer = buffer,
+            assignments = { assignments.get() },
+            instanceId = "test-resume",
+            shutdownSink = shutdownSink,
+            done = done,
+            log = Logging.logger { },
+            retryStrategy = Retry.max(1),
+        )
+
+        try {
+            e.start()
+            assertTrue(resumeLatch.await(3, TimeUnit.SECONDS), "Expected resume when buffer < lowWaterMark")
+        } finally {
+            e.stop().block()
+        }
+    }
+
+    @Test
+    fun `does not emit records from unassigned partitions`() {
+        val buffer = InMemoryReceivedBuffer()
+        val emitted = ConcurrentLinkedQueue<Received>()
+        val assignments = java.util.concurrent.atomic.AtomicReference(setOf(p0))
+        val shutdownSink = Sinks.one<Unit>()
+        val done = Sinks.one<Unit>()
+        val emitLatch = CountDownLatch(1)
+
+        buffer.offer(received(p1, 0L))
+        buffer.offer(received(p0, 1L))
+
+        val e = BufferedEmitter(
+            emit = Emitter.Emit { received ->
+                emitted.add(received)
+                emitLatch.countDown()
+                Mono.just(received)
+            },
+            buffer = buffer,
+            assignments = { assignments.get() },
             instanceId = "test-assignments",
             shutdownSink = shutdownSink,
             done = done,
             log = Logging.logger { },
-            period = 10.milliseconds,
             retryStrategy = Retry.max(1),
         )
 
@@ -215,21 +195,17 @@ class EmitterTest {
     fun `signals done on pipeline completion`() {
         val done = Sinks.one<Unit>()
         val shutdownSink = Sinks.one<Unit>()
-        val buffer = Queues.unbounded<Received>().get()
+        val buffer = InMemoryReceivedBuffer()
         val assignments = AtomicReference(setOf(p0))
 
         val e = BufferedEmitter(
             emit = Emitter.Emit { Mono.just(it) },
-            resume = Emitter.Resume { Mono.just(it) },
             buffer = buffer,
             assignments = { assignments.get() },
-            requestedFromDownstream = { 1L },
-            lowWaterMark = 10,
             instanceId = "test-done",
             shutdownSink = shutdownSink,
             done = done,
             log = Logging.logger { },
-            period = 10.milliseconds,
             retryStrategy = Retry.max(1),
         )
 
@@ -246,10 +222,8 @@ class EmitterTest {
         val recoveryLatch = CountDownLatch(1)
         val done = Sinks.one<Unit>()
         val shutdownSink = Sinks.one<Unit>()
-        val buffer = Queues.unbounded<Received>().get()
+        val buffer = InMemoryReceivedBuffer()
         val assigned = java.util.concurrent.atomic.AtomicReference(setOf(p0))
-
-        repeat(5) { buffer.add(received(p0, it.toLong())) }
 
         val e = BufferedEmitter(
             emit = Emitter.Emit {
@@ -260,20 +234,21 @@ class EmitterTest {
                     Mono.just(it)
                 }
             },
-            resume = Emitter.Resume { Mono.just(it) },
             buffer = buffer,
             assignments = { assigned.get() },
-            requestedFromDownstream = { 1L },
-            lowWaterMark = 10,
             instanceId = "test-retry",
             shutdownSink = shutdownSink,
             done = done,
             log = Logging.logger { },
-            period = 10.milliseconds,
             retryStrategy = Retry.fixedDelay(5, 10.milliseconds.toJavaDuration()),
         )
 
         e.start()
+        buffer.offer(received(p0, 0))
+        Thread.sleep(30)
+        buffer.offer(received(p0, 1))
+        Thread.sleep(30)
+        buffer.offer(received(p0, 2))
         assertTrue(recoveryLatch.await(3, TimeUnit.SECONDS), "Expected pipeline to retry and recover")
         assertTrue(errorAttempts.get() > 2, "Expected pipeline to retry after errors, got ${errorAttempts.get()}")
         e.stop().block()
@@ -287,20 +262,16 @@ class EmitterTest {
     }
 
     private fun createEmitter(): BufferedEmitter {
-        val buffer = Queues.unbounded<Received>().get()
+        val buffer = InMemoryReceivedBuffer()
         val assignments = java.util.concurrent.atomic.AtomicReference(setOf(p0))
         return BufferedEmitter(
             emit = Emitter.Emit { Mono.just(it) },
-            resume = Emitter.Resume { Mono.just(it) },
             buffer = buffer,
             assignments = { assignments.get() },
-            requestedFromDownstream = { 1L },
-            lowWaterMark = 10,
             instanceId = "test",
             shutdownSink = Sinks.one(),
             done = Sinks.one(),
             log = Logging.logger { },
-            period = 100.milliseconds,
             retryStrategy = Retry.max(1),
         )
     }
