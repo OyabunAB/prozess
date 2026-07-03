@@ -43,52 +43,6 @@ class CommitterTest {
     }
 
     @Test
-    fun `flushForPartitions commits pending offsets for specified partitions`() {
-        val commitLog = mutableListOf<Offsets>()
-        val c = committer(commitLog)
-        c.markProcessed(Position(p0, 5L)).block()
-        c.markProcessed(Position(p1, 10L)).block()
-        c.flushForPartitions(setOf(p0)).block()
-        assertEquals(1, commitLog.size)
-        assertEquals(mapOf(p0 to 6L), commitLog[0])
-    }
-
-    @Test
-    fun `flushForPartitions returns empty when no offsets for partitions`() {
-        val commitLog = mutableListOf<Offsets>()
-        val c = committer(commitLog)
-        c.markProcessed(Position(p0, 5L)).block()
-        c.flushForPartitions(setOf(p1)).block()
-        assertTrue(commitLog.isEmpty())
-    }
-
-    @Test
-    fun `flushForPartitions commits multiple partitions`() {
-        val commitLog = mutableListOf<Offsets>()
-        val c = committer(commitLog)
-        c.markProcessed(Position(p0, 5L)).block()
-        c.markProcessed(Position(p1, 10L)).block()
-        c.flushForPartitions(setOf(p0, p1)).block()
-        assertEquals(1, commitLog.size)
-        assertEquals(mapOf(p0 to 6L, p1 to 11L), commitLog[0])
-    }
-
-    @Test
-    fun `flushForPartitions propagates commit error`() {
-        val c = BufferedCommitter(
-            commit = Committer.Commit { Mono.error(RuntimeException("commit failed")) },
-            assignments = { setOf(p0) },
-            instanceId = "test",
-            topicPartitions = setOf(p0),
-            log = Logging.logger { },
-        )
-        c.markProcessed(Position(p0, 5L)).block()
-        org.junit.jupiter.api.assertThrows<RuntimeException> {
-            c.flushForPartitions(setOf(p0)).block()
-        }
-    }
-
-    @Test
     fun `seedOffsets populates processedOffsets`() {
         val c = committer()
         c.seedOffsets(mapOf(p0 to 100L))
@@ -319,29 +273,6 @@ c.start()
         val committed = commitLog.mapNotNull { it[p0] }.sorted()
         assertEquals(listOf(4L, 7L, 10L), committed, "Expected per-batch high-water offsets")
         c.stop().block()
-    }
-
-    @Test
-    fun `flushForPartitions with empty partition set`() {
-        val commitLog = mutableListOf<Offsets>()
-        val c = committer(commitLog)
-        c.markProcessed(Position(p0, 5L)).block()
-        c.flushForPartitions(emptySet()).block()
-        assertTrue(commitLog.isEmpty())
-    }
-
-    @Test
-    fun `multiple flushForPartitions calls accumulate offsets`() {
-        val commitLog = mutableListOf<Offsets>()
-        val c = committer(commitLog)
-        c.markProcessed(Position(p0, 5L)).block()
-        c.flushForPartitions(setOf(p0)).block()
-        assertEquals(1, commitLog.size)
-        assertEquals(mapOf(p0 to 6L), commitLog[0])
-        c.markProcessed(Position(p1, 10L)).block()
-        c.flushForPartitions(setOf(p0, p1)).block()
-        assertEquals(2, commitLog.size)
-        assertEquals(mapOf(p0 to 6L, p1 to 11L), commitLog[1])
     }
 
     @Test

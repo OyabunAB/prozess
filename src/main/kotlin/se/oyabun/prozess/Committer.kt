@@ -30,13 +30,11 @@ import kotlin.time.toJavaDuration
  * Commits processed positions to Kafka in batches.
  *
  * Owns [processedOffsets] state, feeding positions into an internal sink that is
- * drained by a buffered commit pipeline.  Also provides [flushForPartitions] for
- * immediate synchronous commits needed during partition revocation.
+ * drained by a buffered commit pipeline.
  *
  * Lifecycle: [start] → running → [stop].
  * [markProcessed] can be called at any time; positions are batched and committed
- * asynchronously.  [flushForPartitions] bypasses the batch pipeline and commits
- * the latest snapshot of the given partitions directly.
+ * asynchronously.
  *
  * Positions are exposed via [positions] for external consumers such as
  * catch-up completion detection.
@@ -45,14 +43,6 @@ interface Committer {
 
     /** Record a processed position.  Updates [processedOffsets] and enqueues for batch commit. */
     fun markProcessed(position: Position): Mono<Position>
-
-    /**
-     * Commit the latest known offsets for the given partitions immediately.
-     * Returns a [Mono] that completes on success or error.
-     * Used primarily for partition revocation to ensure offsets are saved before
-     * another consumer takes over.
-     */
-    fun flushForPartitions(partitions: Partitions): Mono<Void>
 
     /**
      * Pre-populate offsets without going through the position pipeline.
@@ -144,18 +134,6 @@ internal class BufferedCommitter(
             }
             else -> Mono.error(CommitFailure("$instanceId failed to emit position $position to processed sink: $result"))
         }
-    }
-
-    override fun flushForPartitions(partitions: Partitions): Mono<Void> {
-        val current = processedOffsetsRef.load()
-        val revokedOffsets = partitions.mapNotNull { p ->
-            current[p]?.let { p to it }
-        }.toMap()
-        if (revokedOffsets.isEmpty()) return Mono.empty()
-        return commit.commit(revokedOffsets)
-            .doOnSuccess { log.kafka.committed(instanceId, partitions) }
-            .doOnError { e -> log.kafka.commitFailed(instanceId, partitions, e) }
-            .then()
     }
 
     override fun start(): Disposable {

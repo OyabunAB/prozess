@@ -58,6 +58,15 @@ class StreamingConsumer<M>(
     private var emitterComponent: Emitter? = null
     private var pipelinesActive = java.util.concurrent.atomic.AtomicBoolean(false)
     private var poller: Poller? = null
+    private val rebalanceHandler: RebalanceHandler = CoordinatingRebalanceHandler(
+        committerRef = { committer },
+        assignments = assignments,
+        pendingSeeks = pendingSeeks,
+        ends = ends,
+        paused = { paused.get() },
+        instanceId = instanceId,
+        log = log,
+    )
 
     private val shutdownTask: Mono<Void> = defer {
         if (!disposed.get()) empty()
@@ -127,8 +136,7 @@ class StreamingConsumer<M>(
         .flatMapMany { topicPartitions ->
             val awaitSubscription = client.subscribe(
                 config.topics,
-                onRevoked = { onPartitionsRevoked(this, it) },
-                onAssigned = { onPartitionsAssigned(this, it) },
+                rebalanceHandler,
             )
             val messages = messagesFeed(topicPartitions, sync)
             val synchronizedMessages = Flux.merge(messages, sync)
@@ -205,29 +213,6 @@ class StreamingConsumer<M>(
                         .flatMap { processRetrying(it, attempt + 1) }
                 }
             }
-
-    private fun onPartitionsRevoked(context: RebalanceContext, domain: Partitions) {
-        log.kafka.revoked(instanceId, domain)
-        committer?.flushForPartitions(domain)?.block()
-        assignments.update { it - domain }
-    }
-
-    private fun onPartitionsAssigned(context: RebalanceContext, domain: Partitions) {
-        log.kafka.assigned(instanceId, domain)
-        assignments.update { it + domain }
-        if (paused.get()) context.pause(domain)
-        pendingSeeks.fetchAndUpdate { null }
-            ?.filterKeys { it in domain }
-            ?.takeIf { it.isNotEmpty() }
-            ?.let { context.seek(it) }
-        val endPositions = ends.load()
-        val done = domain.mapNotNull { p ->
-            val endPos = endPositions.find { it.partition == p }
-            if (endPos != null && context.position(p) > endPos.offset) p to (endPos.offset + 1)
-            else null
-        }.toMap()
-        if (done.isNotEmpty()) committer?.seedOffsets(done)
-    }
 
     private fun completionSignal(): Mono<Void> = committer?.positions
         ?.map {
