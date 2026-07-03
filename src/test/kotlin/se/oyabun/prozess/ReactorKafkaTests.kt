@@ -9,7 +9,7 @@ import org.junit.jupiter.api.TestInstance.Lifecycle
 import org.testcontainers.kafka.KafkaContainer
 import reactor.core.publisher.Flux
 import reactor.test.StepVerifier.create
-import se.oyabun.prozess.reactor.ReactorKafkaProducer
+import se.oyabun.prozess.StreamingProducer
 import kotlin.test.assertTrue
 
 @TestInstance(Lifecycle.PER_CLASS)
@@ -31,7 +31,7 @@ class ReactorKafkaTests {
         fun `sendAll passes through original elements`() {
             val topic = topic(bootstrapServers)
             val config = ProducerConfig(bootstrapServers, Topic(topic))
-            val producer = ReactorKafkaProducer<String>(config) { it.toByteArray() }
+            val producer = StreamingProducer<String>(config) { it.toByteArray() }
             val messages = (1..10).map { "msg-$it" }
             val result = producer.sendAll(Flux.fromIterable(messages)) { it }.collectList()
             create(result).assertNext { assertTrue { it.containsAll(messages) } }.verifyComplete()

@@ -1,4 +1,4 @@
-package se.oyabun.prozess.reactor
+package se.oyabun.prozess
 
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows

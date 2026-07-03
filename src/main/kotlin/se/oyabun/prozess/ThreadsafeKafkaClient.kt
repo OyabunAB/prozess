@@ -1,4 +1,4 @@
-package se.oyabun.prozess.reactor
+package se.oyabun.prozess
 
 import se.oyabun.prozess.ConsumerConfig
 import se.oyabun.prozess.Offsets

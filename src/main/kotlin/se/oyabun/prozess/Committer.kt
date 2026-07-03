@@ -1,4 +1,4 @@
-package se.oyabun.prozess.reactor
+package se.oyabun.prozess
 
 import reactor.core.Disposable
 import reactor.core.publisher.Flux
@@ -13,9 +13,9 @@ import se.oyabun.prozess.Logger
 import se.oyabun.prozess.Offsets
 import se.oyabun.prozess.Partitions
 import se.oyabun.prozess.Position
-import se.oyabun.prozess.reactor.Retrying.anyException
-import se.oyabun.prozess.reactor.Retrying.infiniteRetries
-import se.oyabun.prozess.reactor.Retrying.withRetries
+import se.oyabun.prozess.Retrying.anyException
+import se.oyabun.prozess.Retrying.infiniteRetries
+import se.oyabun.prozess.Retrying.withRetries
 import java.time.Clock
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicReference

@@ -1,21 +1,9 @@
-package se.oyabun.prozess.reactor
+package se.oyabun.prozess
 
-import se.oyabun.prozess.ConsumerConfig
-import se.oyabun.prozess.ConsumerNotActive
-import se.oyabun.prozess.EndOffset
-import se.oyabun.prozess.Logging
-import se.oyabun.prozess.Offsets
-import se.oyabun.prozess.Partition
-import se.oyabun.prozess.Partitions
-import se.oyabun.prozess.Position
-import se.oyabun.prozess.Positions
 import se.oyabun.prozess.Prozess.ConsumerFilter
 import se.oyabun.prozess.Prozess.ConsumerProcess
-import se.oyabun.prozess.Received
-import se.oyabun.prozess.StartOffset
 import se.oyabun.prozess.StartOffset.AtTimestamp
 import se.oyabun.prozess.StartOffset.Earliest
-import se.oyabun.prozess.asOffsets
 import reactor.core.Disposable
 import reactor.core.publisher.Flux
 import reactor.core.publisher.FluxSink
@@ -34,20 +22,18 @@ import reactor.util.concurrent.Queues
 import reactor.util.retry.Retry
 import se.oyabun.prozess.EndOffset.CatchUp
 import se.oyabun.prozess.Prozess
-import se.oyabun.prozess.RebalanceContext
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.concurrent.atomics.fetchAndUpdate
 import kotlin.concurrent.atomics.update
 import kotlin.time.Clock
-import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.toJavaDuration
 
 @OptIn(ExperimentalAtomicApi::class)
-class ReactorKafkaConsumer<M>(
+class StreamingConsumer<M>(
     val config: ConsumerConfig,
     private val filter: ConsumerFilter = { true },
     private val deserializer: Prozess.Deserializer<M>,
@@ -73,17 +59,17 @@ class ReactorKafkaConsumer<M>(
     private var pipelinesActive = java.util.concurrent.atomic.AtomicBoolean(false)
     private var poller: Poller? = null
 
-    private val shutdownTask: Mono<Void> = Mono.defer {
-        if (!disposed.get()) Mono.empty()
+    private val shutdownTask: Mono<Void> = defer {
+        if (!disposed.get()) empty()
         else fromCallable {
                 client.wakeup()
                 closeSignal.tryEmitEmpty()
             }
             .then(
                 if (pipelinesActive.get())
-                    Mono.`when`(poller?.stop() ?: empty<Void>(), emitterComponent?.stop() ?: empty<Void>())
+                    `when`(poller?.stop() ?: empty<Void>(), emitterComponent?.stop() ?: empty<Void>())
                         .then(committer?.stop() ?: empty())
-                else Mono.empty()
+                else empty()
             )
             .then(client.close())
     }.cache()
@@ -211,7 +197,7 @@ class ReactorKafkaConsumer<M>(
         fromCallable { deserializer.invoke(received.message) }
             .map { process(received, it); received.position }
             .onErrorResume { e ->
-                if (disposed.get()) Mono.error(e)
+                if (disposed.get()) error(e)
                 else {
                     log.kafka.processingRetrying(instanceId, received.position.partition, attempt, e)
                     delay(backoff(attempt))
@@ -261,7 +247,28 @@ class ReactorKafkaConsumer<M>(
         topicPartitions: Partitions,
         sync: Mono<Received>,
     ): Flux<Received> = Flux.create { emitter: FluxSink<Received> ->
-        val buffer = Queues.unbounded<Received>().get()
+        lateinit var buffer: ReceivedBuffer
+        val pauseBlock = {
+            val current = assignments.load()
+            if (current.isNotEmpty()) {
+                log.kafka.bufferSaturated(instanceId, current, buffer.size)
+                client.pause(current).subscribe()
+            }
+        }
+        val resumeBlock = {
+            val current = assignments.load()
+            if (current.isNotEmpty()) {
+                log.kafka.bufferDrained(instanceId, current, buffer.size)
+                client.resume(current).subscribe()
+            }
+        }
+        buffer = InMemoryReceivedBuffer(
+            delegate = Queues.unbounded<Received>().get(),
+            highWaterMark = highWaterMark,
+            lowWaterMark = lowWaterMark,
+            onPause = pauseBlock,
+            onResume = resumeBlock,
+        )
         val pollerShutdownSink = Sinks.one<Unit>()
         val emitterShutdownSink = Sinks.one<Unit>()
         val pollingDone = Sinks.one<Unit>()
@@ -269,7 +276,7 @@ class ReactorKafkaConsumer<M>(
         pipelinesActive.set(true)
 
         val c = BufferedCommitter(
-            commit = Committer.Commit { offsets -> client.commit(offsets, "$instanceId@${Clock.System.now()}") },
+            commit = { offsets -> client.commit(offsets, "$instanceId@${Clock.System.now()}") },
             assignments = { assignments.load() },
             instanceId = instanceId,
             topicPartitions = topicPartitions,
@@ -280,12 +287,9 @@ class ReactorKafkaConsumer<M>(
         committer = c
 
         val e = BufferedEmitter(
-            emit = Emitter.Emit { received -> emitter.next(received); just(received) },
-            resume = Emitter.Resume { client.resume(it) },
+            emit = { received -> emitter.next(received); just(received) },
             buffer = buffer,
             assignments = { assignments.load() },
-            requestedFromDownstream = { emitter.requestedFromDownstream() },
-            lowWaterMark = lowWaterMark,
             instanceId = instanceId,
             shutdownSink = emitterShutdownSink,
             done = emittingDone,
@@ -295,12 +299,11 @@ class ReactorKafkaConsumer<M>(
         emitterComponent = e
 
         poller = BufferedPoller(
-            poll = Poller.Poll { client.poll() },
-            pause = Poller.Pause { client.pause(it) },
-            resume = Poller.Resume { client.resume(it) },
+            poll = { client.poll() },
+            pause = { client.pause(it) },
+            resume = { client.resume(it) },
             buffer = buffer,
             assignments = { assignments.load() },
-            highWaterMark = highWaterMark,
             instanceId = instanceId,
             pollInterval = config.pollInterval,
             shutdownSink = pollerShutdownSink,
