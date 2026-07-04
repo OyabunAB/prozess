@@ -109,7 +109,7 @@ internal class BufferedCommitter(
     private val done = Sinks.one<Unit>()
     private val schedulerRef = AtomicReference(Schedulers.immediate())
     private val running = AtomicBoolean(false)
-    private var disposable: Disposable? = null
+    private var disposable: Disposable = Disposable { }
 
     override val processedOffsets: Offsets get() = processedOffsetsRef.load()
 
@@ -169,14 +169,14 @@ internal class BufferedCommitter(
 
     override fun stop(): Mono<Void> {
         if (!running.get()) {
-            disposable?.dispose()
+            disposable.dispose()
             schedulerRef.fetchAndUpdate { Schedulers.immediate() }.dispose()
             return Mono.empty()
         }
         processed.tryEmitComplete()
         return done.asMono()
             .doFinally {
-                disposable?.dispose()
+                disposable.dispose()
                 schedulerRef.fetchAndUpdate { Schedulers.immediate() }.dispose()
                 running.set(false)
             }

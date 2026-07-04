@@ -31,7 +31,7 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.toJavaDuration
-internal class ThreadsafeKafkaClient(config: ConsumerConfig) {
+internal class ThreadsafeKafkaClient(config: ConsumerConfig) : ShutdownableClient {
     private val delegate = KafkaConsumer<String, ByteArray>(
         mapOf(
             ApacheConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG to StringDeserializer::class.java.name,
@@ -134,9 +134,9 @@ internal class ThreadsafeKafkaClient(config: ConsumerConfig) {
                 .mapValues { it.value?.offset() ?: 0L }
         }.subscribeOn(scheduler)
 
-    fun wakeup() = delegate.wakeup()
+    override fun wakeup() = delegate.wakeup()
 
-    fun close(): Mono<Void> = fromCallable {
+    override fun close(): Mono<Void> = fromCallable {
         delegate.close(3.seconds.toJavaDuration())
         scheduler.dispose()
     }.then()

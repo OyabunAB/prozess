@@ -31,10 +31,10 @@ internal interface RebalanceHandler {
     /**
      * Invoked when partitions are revoked from this consumer.
      *
-     * If a [Committer] is available, its [Committer.processedOffsets] are snapshot
-     * and committed synchronously via [RebalanceContext.commit] -- this is the last
-     * opportunity to commit offsets for these partitions before another consumer
-     * takes over.  The partitions are then removed from the assignment set.
+     * The [Committer.processedOffsets] are snapshotted and committed synchronously
+     * via [RebalanceContext.commit] -- this is the last opportunity to commit offsets
+     * for these partitions before another consumer takes over.  The partitions are
+     * then removed from the assignment set.
      *
      * @param context  direct-access bridge to the underlying KafkaConsumer.
      * @param partitions  the set of revoked partitions.
@@ -61,13 +61,13 @@ internal interface RebalanceHandler {
  *
  * Owns the coordination logic extracted from [StreamingConsumer].  All mutable
  * state ([assignments], [pendingSeeks], [ends]) is passed as [AtomicReference]
- * to guarantee visibility across threads.  The [committerRef] is a lambda so
- * that the handler can be created before the committer pipeline is initialised;
- * the lambda returns `null` until [Committer.start] has been called.
+ * to guarantee visibility across threads.  The [committerRef] is a lambda that
+ * resolves the current [Committer] at callback time (always non-null — the
+ * committer exists before rebalance callbacks fire in the subscription chain).
  *
- * @param committerRef  returns the current [Committer] or `null`.
+ * @param committerRef  resolves the current [Committer].
  * @param assignments   the current set of assigned partitions.
- * @param pendingSeeks  one-shot seeks (cleared on first assign).
+ * @param pendingSeeks  one-shot seeks (reset to `emptyMap()` on first assign).
  * @param ends          known end-offsets for catch-up detection.
  * @param paused        whether the consumer is externally paused.
  * @param instanceId    label used in log messages.
@@ -75,9 +75,9 @@ internal interface RebalanceHandler {
  */
 @OptIn(ExperimentalAtomicApi::class)
 internal class CoordinatingRebalanceHandler(
-    private val committerRef: () -> Committer?,
+    private val committerRef: () -> Committer,
     private val assignments: AtomicReference<Partitions>,
-    private val pendingSeeks: AtomicReference<Offsets?>,
+    private val pendingSeeks: AtomicReference<Offsets>,
     private val ends: AtomicReference<Positions>,
     private val paused: () -> Boolean,
     private val instanceId: String,
@@ -86,13 +86,10 @@ internal class CoordinatingRebalanceHandler(
 
     override fun onPartitionsRevoked(context: RebalanceContext, partitions: Partitions) {
         log.kafka.revoked(instanceId, partitions)
-        val c = committerRef()
-        if (c != null) {
-            val offsets = c.processedOffsets.filterKeys { it in partitions }
-            if (offsets.isNotEmpty()) {
-                context.commit(offsets)
-                log.kafka.committed(instanceId, partitions)
-            }
+        val offsets = committerRef().processedOffsets.filterKeys { it in partitions }
+        if (offsets.isNotEmpty()) {
+            context.commit(offsets)
+            log.kafka.committed(instanceId, partitions)
         }
         assignments.update { it - partitions }
     }
@@ -101,9 +98,9 @@ internal class CoordinatingRebalanceHandler(
         log.kafka.assigned(instanceId, partitions)
         assignments.update { it + partitions }
         if (paused() && partitions.isNotEmpty()) context.pause(partitions)
-        pendingSeeks.fetchAndUpdate { null }
-            ?.filterKeys { it in partitions }
-            ?.takeIf { it.isNotEmpty() }
+        pendingSeeks.fetchAndUpdate { emptyMap() }
+            .filterKeys { it in partitions }
+            .takeIf { it.isNotEmpty() }
             ?.let { context.seek(it) }
         val endPositions = ends.load()
         val done = partitions.mapNotNull { p ->
@@ -111,6 +108,6 @@ internal class CoordinatingRebalanceHandler(
             if (endPos != null && context.position(p) > endPos.offset) p to (endPos.offset + 1)
             else null
         }.toMap()
-        if (done.isNotEmpty()) committerRef()?.seedOffsets(done)
+        if (done.isNotEmpty()) committerRef().seedOffsets(done)
     }
 }

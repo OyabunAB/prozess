@@ -73,7 +73,7 @@ internal class BufferedPoller(
 
     private val timer = AtomicReference<Scheduler>(Schedulers.immediate())
     private val running = AtomicBoolean(false)
-    private var disposable: Disposable? = null
+    private var disposable: Disposable = Disposable { }
 
     override fun start(): Disposable {
         if (!running.compareAndSet(false, true)) throw PollerAlreadyRunning("$instanceId already running")
@@ -86,14 +86,14 @@ internal class BufferedPoller(
 
     override fun stop(): Mono<Void> {
         if (!running.get()) {
-            disposable?.dispose()
+            disposable.dispose()
             timer.getAndSet(Schedulers.immediate()).dispose()
             return Mono.empty()
         }
         shutdownSink.tryEmitValue(Unit)
         return done.asMono()
             .doFinally {
-                disposable?.dispose()
+                disposable.dispose()
                 timer.getAndSet(Schedulers.immediate()).dispose()
                 running.set(false)
             }
