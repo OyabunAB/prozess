@@ -8,12 +8,12 @@ The consumer is split into three independent pipelines that share an in-memory b
 
 ```
    Poller                        Emitter                          Committer
-  ┌─────────────────────┐       ┌──────────────────────┐        ┌──────────────────────────┐
-  │ Flux.interval       │       │ buffer.asFlux()      │        │ Sinks.Many<Position>     │
-  │  ─► client.poll()   │──buf─►│  ─► concatMap(emit)  │──pos──►│  ─► bufferTimeout()      │
-  │  ─► buffer.offer()  │       │  ─► filter partition │        │  ─► client.commit()      │
-  └─────────┬───────────┘       └──────────────────────┘        │  ─► flushForPartitions() │
-            │                                                   └──────────────────────────┘
+  ┌─────────────────────┐       ┌──────────────────────┐        ┌──────────────────────┐
+  │ Flux.interval       │       │ buffer.asFlux()      │        │ Sinks.Many<Position> │
+  │  ─► client.poll()   │──buf─►│  ─► concatMap(emit)  │──pos──►│  ─► bufferTimeout()  │
+  │  ─► buffer.offer()  │       │  ─► filter partition │        │  ─► client.commit()  │
+  └─────────┬───────────┘       └──────────────────────┘        └──────────────────────┘
+            │
        pause/resume
   (via buffer callbacks)
 ```
@@ -90,7 +90,7 @@ The Poller (`BufferedPoller`) runs the poll loop on a single scheduler thread, c
 - `running` flag uses `AtomicBoolean` — `start()`/`stop()` are safe to call from different threads
 - `stop()` fires `shutdownSink`, awaits `done` via `done.asMono()`, then disposes subscription and scheduler in `doFinally` — safe to call after pipeline completion (returns `Mono.empty()` if already stopped)
 - `pause()`/`resume()` check `running` before calling the SAM operation — the SAM operation itself is not thread-safe, but it runs on the caller's thread, and the underlying Kafka client serialises access via its own single-thread scheduler
-- The `disposable` field is null-safe: `?.dispose()` is idempotent
+- `disposable` is always non-null — default `Disposable { }` before `start()` sets the real one
 
 ### Emitter
 
@@ -137,7 +137,7 @@ No timer, no manual poll loop, no demand checking — Reactor handles back-press
 
 - `running` flag uses `AtomicBoolean` — `start()`/`stop()` are safe to call from different threads
 - `stop()` fires `shutdownSink`, awaits `done` via `done.asMono()`, then disposes subscription and scheduler in `doFinally` — safe to call after pipeline completion (returns `Mono.empty()` if already stopped)
-- The `disposable` field is null-safe: `?.dispose()` is idempotent
+- `disposable` is always non-null — default `Disposable { }` before `start()` sets the real one
 - The shared `ReceivedBuffer` is accessed from both Poller (writer via `offer()`) and Emitter (reader via `asFlux()`) — `InMemoryReceivedBuffer` uses `ConcurrentLinkedQueue` and is thread-safe
 
 ### Committer
@@ -147,7 +147,6 @@ The Committer (`BufferedCommitter`) owns the committed offsets state and runs a 
 - Accepts positions via `markProcessed(position)` — updates `processedOffsets` atomically and feeds an internal `Sinks.Many<Position>`
 - Batches positions with `bufferTimeout(25, 1s)` and commits the highest offset per partition
 - Filters out unassigned partitions before committing (avoids committing offsets for partitions the consumer no longer owns)
-- `flushForPartitions(partitions)` performs an immediate synchronous commit for revoked partitions — used in the rebalance callback to ensure offsets are saved before another consumer takes over
 - `seedOffsets(offsets)` pre-populates offsets without going through the position pipeline (catch-up completion)
 - Exposes `positions: Flux<Position>` for external subscribers (completion detection)
 - `stop(): Mono<Void>` fires `tryEmitComplete()` on the internal sink, awaits pipeline drain, then disposes the scheduler

@@ -6,20 +6,19 @@ import se.oyabun.prozess.StartOffset.AtTimestamp
 import se.oyabun.prozess.StartOffset.Earliest
 import reactor.core.Disposable
 import reactor.core.publisher.Flux
-import reactor.core.publisher.FluxSink
 import reactor.core.publisher.Mono
-import reactor.core.publisher.Mono.defer
 import reactor.core.publisher.Mono.delay
 import reactor.core.publisher.Mono.empty
 import reactor.core.publisher.Mono.error
 import reactor.core.publisher.Mono.fromCallable
 import reactor.core.publisher.Mono.just
 import reactor.core.publisher.Mono.never
-import reactor.core.publisher.Mono.`when`
 import reactor.core.publisher.Mono.zip
 import reactor.core.publisher.Sinks
 import reactor.util.concurrent.Queues
 import reactor.util.retry.Retry
+import se.oyabun.prozess.Retrying.infiniteRetries
+import se.oyabun.prozess.Retrying.withRetries
 import se.oyabun.prozess.EndOffset.CatchUp
 import se.oyabun.prozess.Prozess
 import kotlin.concurrent.atomics.AtomicBoolean
@@ -28,6 +27,7 @@ import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.concurrent.atomics.fetchAndUpdate
 import kotlin.concurrent.atomics.update
 import kotlin.time.Clock
+import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.toJavaDuration
@@ -39,6 +39,25 @@ class StreamingConsumer<M>(
     private val deserializer: Prozess.Deserializer<M>,
     private val process: ConsumerProcess<M> = { _,_ -> },
     instance: String? = "consumer",
+    private var committer: Committer = object : Committer {
+        override fun markProcessed(position: Position) = Mono.just(position)
+        override fun seedOffsets(offsets: Offsets) {}
+        override val positions: Flux<Position> get() = Flux.empty()
+        override val processedOffsets: Offsets get() = emptyMap()
+        override fun start(): Disposable = Disposable { }
+        override fun stop(): Mono<Void> = empty()
+    },
+    private var emitter: Emitter = object : Emitter {
+        override fun start(): Disposable = Disposable { }
+        override fun stop(): Mono<Void> = empty()
+    },
+    private var poller: Poller = object : Poller {
+        override fun start(): Disposable = Disposable { }
+        override fun stop(): Mono<Void> = empty()
+        override fun pause() {}
+        override fun resume() {}
+        override val isRunning: Boolean get() = false
+    },
 ) {
     private val log = Logging.logger { }
     private val instanceId = "[$instance ${config.topics} consumer]"
@@ -48,16 +67,10 @@ class StreamingConsumer<M>(
     private val started = AtomicBoolean(false)
     private val highWaterMark = config.maxPollRecords
     private val lowWaterMark = config.maxPollRecords / 4
-    private val pendingSeeks = AtomicReference<Offsets?>(null)
+    private val pendingSeeks = AtomicReference<Offsets>(emptyMap())
     private val paused = java.util.concurrent.atomic.AtomicBoolean(false)
     private val closeSignal = Sinks.one<Unit>()
     private val disposed = java.util.concurrent.atomic.AtomicBoolean(false)
-    private var shutdownDone = Sinks.one<Unit>()
-    private var subscription: Disposable? = null
-    private var committer: Committer? = null
-    private var emitterComponent: Emitter? = null
-    private var pipelinesActive = java.util.concurrent.atomic.AtomicBoolean(false)
-    private var poller: Poller? = null
     private val rebalanceHandler: RebalanceHandler = CoordinatingRebalanceHandler(
         committerRef = { committer },
         assignments = assignments,
@@ -68,21 +81,6 @@ class StreamingConsumer<M>(
         log = log,
     )
 
-    private val shutdownTask: Mono<Void> = defer {
-        if (!disposed.get()) empty()
-        else fromCallable {
-                client.wakeup()
-                closeSignal.tryEmitEmpty()
-            }
-            .then(
-                if (pipelinesActive.get())
-                    `when`(poller?.stop() ?: empty<Void>(), emitterComponent?.stop() ?: empty<Void>())
-                        .then(committer?.stop() ?: empty())
-                else empty()
-            )
-            .then(client.close())
-    }.cache()
-
     fun start(
         from: StartOffset = StartOffset.Latest,
         until: EndOffset = EndOffset.Continuous,
@@ -90,8 +88,7 @@ class StreamingConsumer<M>(
         check(started.compareAndSet(false, true)) { "$instanceId start() called more than once" }
         val complete = completionSignal()
         val sync = syncSignal(until, complete)
-        shutdownDone = Sinks.one()
-        subscription = incomingFeed(sync, closeSignal.asMono(), from, until)
+        incomingFeed(sync, closeSignal.asMono(), from, until)
             .groupBy { it.position.partition }
             .flatMap { partition ->
                 partition.concatMap { received ->
@@ -99,32 +96,33 @@ class StreamingConsumer<M>(
                     else just(received.position)
                 }
             }
-            .flatMap { position -> committer?.markProcessed(position) ?: just(position) }
+            .flatMap { position -> committer.markProcessed(position) }
             .subscribe()
     }
 
-    fun shutdown() {
+    fun shutdown(duration: Duration? = null) {
         if (!disposed.compareAndSet(false, true)) return
-        shutdownTask
-            .onErrorResume { e -> log.kafka.terminatedUnexpectedly(instanceId, e); empty() }
-            .block()
-    }
-
-    fun shutdownAsync(): Mono<Void> {
-        if (!disposed.compareAndSet(false, true)) return shutdownTask
-        return shutdownTask
+        ShutdownCoordinator(
+            client = client,
+            closeSignal = closeSignal,
+            poller = poller,
+            emitter = emitter,
+            committer = committer,
+            instanceId = instanceId,
+            log = log,
+        ).shutdown(duration)
     }
 
     val isDisposed: Boolean get() = disposed.get()
 
     fun pause() {
         paused.set(true)
-        poller?.pause()
+        poller.pause()
     }
 
     fun resume() {
         paused.set(false)
-        poller?.resume()
+        poller.resume()
     }
 
     private fun incomingFeed(
@@ -205,7 +203,7 @@ class StreamingConsumer<M>(
         fromCallable { deserializer.invoke(received.message) }
             .map { process(received, it); received.position }
             .onErrorResume { e ->
-                if (disposed.get()) error(e)
+                if (isDisposed) error(e)
                 else {
                     log.kafka.processingRetrying(instanceId, received.position.partition, attempt, e)
                     delay(backoff(attempt))
@@ -214,14 +212,14 @@ class StreamingConsumer<M>(
                 }
             }
 
-    private fun completionSignal(): Mono<Void> = committer?.positions
-        ?.map {
+    private fun completionSignal(): Mono<Void> = committer.positions
+        .map {
             assignments.load().all { partition ->
                 val lastPosition = ends.load().find { it.partition == partition }
-                lastPosition == null || (committer?.processedOffsets?.get(partition) ?: 0L) >= lastPosition.offset
+                lastPosition == null || (committer.processedOffsets[partition] ?: 0L) >= lastPosition.offset
             }
         }
-        ?.filter { it }?.next()?.then()?.cache() ?: never()
+        .filter { it }.next().then().cache()
 
     private fun syncSignal(until: EndOffset, complete: Mono<Void>): Mono<Received> = when (until) {
         is CatchUp -> empty<Received>().delaySubscription(complete)
@@ -231,34 +229,25 @@ class StreamingConsumer<M>(
     private fun messagesFeed(
         topicPartitions: Partitions,
         sync: Mono<Received>,
-    ): Flux<Received> = Flux.create { emitter: FluxSink<Received> ->
-        lateinit var buffer: ReceivedBuffer
-        val pauseBlock = {
-            val current = assignments.load()
-            if (current.isNotEmpty()) {
-                log.kafka.bufferSaturated(instanceId, current, buffer.size)
-                client.pause(current).subscribe()
-            }
-        }
-        val resumeBlock = {
-            val current = assignments.load()
-            if (current.isNotEmpty()) {
-                log.kafka.bufferDrained(instanceId, current, buffer.size)
-                client.resume(current).subscribe()
-            }
-        }
-        buffer = InMemoryReceivedBuffer(
+    ): Flux<Received> {
+        val sink = Sinks.many().unicast().onBackpressureBuffer<Received>()
+        val buffer = InMemoryReceivedBuffer(
             delegate = Queues.unbounded<Received>().get(),
             highWaterMark = highWaterMark,
             lowWaterMark = lowWaterMark,
-            onPause = pauseBlock,
-            onResume = resumeBlock,
+            onPause = {
+                val current = assignments.load()
+                if (current.isNotEmpty()) client.pause(current).subscribe()
+            },
+            onResume = {
+                val current = assignments.load()
+                if (current.isNotEmpty()) client.resume(current).subscribe()
+            },
         )
         val pollerShutdownSink = Sinks.one<Unit>()
         val emitterShutdownSink = Sinks.one<Unit>()
         val pollingDone = Sinks.one<Unit>()
         val emittingDone = Sinks.one<Unit>()
-        pipelinesActive.set(true)
 
         val c = BufferedCommitter(
             commit = { offsets -> client.commit(offsets, "$instanceId@${Clock.System.now()}") },
@@ -272,7 +261,7 @@ class StreamingConsumer<M>(
         committer = c
 
         val e = BufferedEmitter(
-            emit = { received -> emitter.next(received); just(received) },
+            emit = { received -> sink.safeEmit(received, instanceId).thenReturn(received) },
             buffer = buffer,
             assignments = { assignments.load() },
             instanceId = instanceId,
@@ -281,9 +270,9 @@ class StreamingConsumer<M>(
             log = log,
         )
         e.start()
-        emitterComponent = e
+        emitter = e
 
-        poller = BufferedPoller(
+        val p = BufferedPoller(
             poll = { client.poll() },
             pause = { client.pause(it) },
             resume = { client.resume(it) },
@@ -295,13 +284,11 @@ class StreamingConsumer<M>(
             done = pollingDone,
             log = log,
         )
-        poller?.start()
-        emitter.onDispose {
-            pollerShutdownSink.tryEmitValue(Unit)
-            emitterShutdownSink.tryEmitValue(Unit)
-            shutdownDone.tryEmitEmpty()
-        }
-    }.takeUntilOther(sync)
+        p.start()
+        poller = p
+
+        return sink.asFlux().takeUntilOther(sync)
+    }
 
     fun hasNoAssignments(): Boolean = assignments.load().isEmpty()
 
@@ -317,3 +304,23 @@ class StreamingConsumer<M>(
             minOf(30.seconds, 1.seconds * (1 shl attempt.toInt().coerceAtMost(30))).toJavaDuration()
     }
 }
+
+private class SinkOverflowException : RuntimeException()
+
+private fun <T : Any> Sinks.Many<T>.safeEmit(value: T, id: Any): Mono<Void> =
+    Mono.defer { Mono.just(tryEmitNext(value)) }
+        .flatMap { result ->
+            when (result) {
+                Sinks.EmitResult.OK -> Mono.just(Unit)
+                Sinks.EmitResult.FAIL_TERMINATED, Sinks.EmitResult.FAIL_CANCELLED, Sinks.EmitResult.FAIL_ZERO_SUBSCRIBER -> Mono.just(Unit)
+                Sinks.EmitResult.FAIL_OVERFLOW -> Mono.error(SinkOverflowException())
+                else -> Mono.error(RuntimeException("Sink emission failed: $result"))
+            }
+        }
+        .withRetries(
+            id = id,
+            maxAttempts = infiniteRetries,
+            minBackoff = 10.milliseconds,
+            retryOn = { it is SinkOverflowException },
+        )
+        .then()

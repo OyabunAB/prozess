@@ -55,17 +55,6 @@ class RebalanceHandlerTest {
     }
 
     @Test
-    fun `onPartitionsRevoked handles empty committer gracefully`() {
-        val assignments = AtomicReference<Partitions>(setOf(p0))
-        var commitCalled = false
-        val context = mockContext(onCommit = { commitCalled = true })
-        val handler = handler(assignments = assignments, committerRef = { null })
-        handler.onPartitionsRevoked(context, setOf(p0))
-        assertTrue(assignments.load().isEmpty(), "Assignments should be updated even without committer")
-        assertEquals(false, commitCalled, "Commit should not be called without committer")
-    }
-
-    @Test
     fun `onPartitionsRevoked with multiple revoked partitions commits each`() {
         val assignments = AtomicReference<Partitions>(setOf(p0, p1, p2))
         val committed = mutableListOf<Offsets>()
@@ -112,7 +101,7 @@ class RebalanceHandlerTest {
     @Test
     fun `onPartitionsAssigned applies pending seeks for assigned partitions`() {
         val assignments = AtomicReference<Partitions>(emptySet())
-        val pendingSeeks = AtomicReference<Offsets?>(mapOf(p0 to 100L, p1 to 200L, p2 to 300L))
+        val pendingSeeks = AtomicReference<Offsets>(mapOf(p0 to 100L, p1 to 200L, p2 to 300L))
         val seeks = mutableMapOf<Partition, Long>()
         val context = mockContext(onSeek = { partition, offset -> seeks[partition] = offset })
 
@@ -124,7 +113,7 @@ class RebalanceHandlerTest {
 
         assertEquals(setOf(p0, p1), assignments.load())
         assertEquals(mapOf(p0 to 100L, p1 to 200L), seeks, "Should seek only assigned partitions")
-        assertTrue(pendingSeeks.load() == null, "pendingSeeks should be cleared")
+        assertTrue(pendingSeeks.load().isEmpty(), "pendingSeeks should be cleared")
     }
 
     @Test
@@ -218,12 +207,12 @@ class RebalanceHandlerTest {
         val context = mockContext(onSeek = { _, _ -> seekCalled = true })
         val handler = handler()
         handler.onPartitionsAssigned(context, setOf(p0))
-        assertEquals(false, seekCalled, "Should not seek when pendingSeeks is null")
+        assertEquals(false, seekCalled, "Should not seek when pendingSeeks is empty")
     }
 
     @Test
     fun `onPartitionsAssigned with pending seeks not overlapping does not seek`() {
-        val pendingSeeks = AtomicReference<Offsets?>(mapOf(p2 to 100L))
+        val pendingSeeks = AtomicReference<Offsets>(mapOf(p2 to 100L))
         var seekCalled = false
         val context = mockContext(onSeek = { _, _ -> seekCalled = true })
         val handler = handler(pendingSeeks = pendingSeeks)
@@ -353,10 +342,10 @@ class RebalanceHandlerTest {
 
     private fun handler(
         assignments: AtomicReference<Partitions> = AtomicReference(emptySet()),
-        pendingSeeks: AtomicReference<Offsets?> = AtomicReference(null),
+        pendingSeeks: AtomicReference<Offsets> = AtomicReference(emptyMap()),
         ends: AtomicReference<Positions> = AtomicReference(emptySet()),
         paused: () -> Boolean = { false },
-        committerRef: () -> Committer? = { null },
+        committerRef: () -> Committer = { mockCommitter() },
     ) = CoordinatingRebalanceHandler(
         committerRef = committerRef,
         assignments = assignments,

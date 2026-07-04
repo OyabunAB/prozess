@@ -1,0 +1,57 @@
+package se.oyabun.prozess
+
+import reactor.core.publisher.Mono
+import reactor.core.publisher.Mono.defer
+import reactor.core.publisher.Mono.fromCallable
+import reactor.core.publisher.Mono.`when`
+import reactor.core.publisher.Sinks
+import kotlin.time.Duration
+import kotlin.time.toJavaDuration
+
+/** Client contract for [ShutdownCoordinator] — wakeup + close. */
+interface ShutdownableClient {
+    fun wakeup()
+    fun close(): Mono<Void>
+}
+
+/**
+ * Orchestrates a graceful shutdown sequence: signal close, stop pipelines in
+ * parallel (poller + emitter), flush committer, then close the client.
+ *
+ * Constructed once at shutdown time with the live component references — no
+ * indirection, no state, disposable.
+ *
+ * @param client       the underlying Kafka client.
+ * @param closeSignal  emitted to terminate the message feed flux.
+ * @param poller       the poller to stop.
+ * @param emitter      the emitter to stop.
+ * @param committer    the committer to flush.
+ * @param instanceId   label for logging.
+ * @param log          logger.
+ */
+class ShutdownCoordinator(
+    private val client: ShutdownableClient,
+    private val closeSignal: Sinks.One<Unit>,
+    private val poller: Poller,
+    private val emitter: Emitter,
+    private val committer: Committer,
+    private val instanceId: String,
+    private val log: Logger,
+) {
+    fun shutdown(duration: Duration? = null) {
+        val task = fromCallable {
+            client.wakeup()
+            closeSignal.tryEmitEmpty()
+        }.then(
+            `when`(poller.stop(), emitter.stop()).then(committer.stop())
+        ).then(defer { client.close() })
+        try {
+            if (duration != null) task.block(duration.toJavaDuration())
+            else task.block()
+        } catch (e: Exception) {
+            log.kafka.terminatedUnexpectedly(instanceId, e)
+            client.wakeup()
+            try { client.close().block() } catch (_: Exception) { }
+        }
+    }
+}
