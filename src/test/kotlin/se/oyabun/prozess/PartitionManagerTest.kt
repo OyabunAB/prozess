@@ -15,14 +15,13 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
-import kotlin.concurrent.atomics.update
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlin.test.fail
 
 @OptIn(ExperimentalAtomicApi::class)
-class RebalanceHandlerTest {
+class PartitionManagerTest {
 
     private val topic = Topic("test")
     private val p0 = Partition(0, topic)
@@ -32,37 +31,34 @@ class RebalanceHandlerTest {
 
     @Test
     fun `onPartitionsRevoked commits processed offsets via context and removes from assignments`() {
-        val assignments = AtomicReference<Partitions>(setOf(p0, p1))
         val committed = mutableListOf<Offsets>()
         val committer = BufferedCommitter(
             commit = Committer.Commit { Mono.just(it) },
             assignments = { setOf(p0, p1) },
             instanceId = "test",
-            topicPartitions = setOf(p0, p1),
             log = log,
         )
         committer.markProcessed(Position(p0, 5L)).block()
         committer.markProcessed(Position(p1, 10L)).block()
 
         val context = mockContext(onCommit = { committed.add(it) })
-        val handler = handler(assignments = assignments, committerRef = { committer })
+        val handler = handler()
+        handler.onPartitionsAssigned(mockContext(), setOf(p0, p1))
 
-        handler.onPartitionsRevoked(context, setOf(p0))
+        handler.onPartitionsRevoked(context, setOf(p0), committer.processedOffsets)
 
-        assertEquals(setOf(p1), assignments.load(), "p0 should be removed from assignments")
+        assertEquals(setOf(p1), handler.assignments(), "p0 should be removed from assignments")
         assertEquals(1, committed.size)
         assertEquals(mapOf(p0 to 6L), committed[0], "Should commit offset for p0 only")
     }
 
     @Test
     fun `onPartitionsRevoked with multiple revoked partitions commits each`() {
-        val assignments = AtomicReference<Partitions>(setOf(p0, p1, p2))
         val committed = mutableListOf<Offsets>()
         val committer = BufferedCommitter(
             commit = Committer.Commit { Mono.just(it) },
             assignments = { setOf(p0, p1, p2) },
             instanceId = "test",
-            topicPartitions = setOf(p0, p1, p2),
             log = log,
         )
         committer.markProcessed(Position(p0, 5L)).block()
@@ -70,59 +66,56 @@ class RebalanceHandlerTest {
         committer.markProcessed(Position(p2, 15L)).block()
 
         val context = mockContext(onCommit = { committed.add(it) })
-        val handler = handler(assignments = assignments, committerRef = { committer })
-        handler.onPartitionsRevoked(context, setOf(p0, p2))
+        val handler = handler()
+        handler.onPartitionsAssigned(mockContext(), setOf(p0, p1, p2))
+        handler.onPartitionsRevoked(context, setOf(p0, p2), committer.processedOffsets)
 
-        assertEquals(setOf(p1), assignments.load())
+        assertEquals(setOf(p1), handler.assignments())
         assertEquals(1, committed.size)
         assertEquals(mapOf(p0 to 6L, p2 to 16L), committed[0])
     }
 
     @Test
     fun `onPartitionsAssigned adds partitions to assignments`() {
-        val assignments = AtomicReference<Partitions>(emptySet())
-        val handler = handler(assignments = assignments)
+        val handler = handler()
 
         handler.onPartitionsAssigned(mockContext(), setOf(p0, p1))
 
-        assertEquals(setOf(p0, p1), assignments.load())
+        assertEquals(setOf(p0, p1), handler.assignments())
     }
 
     @Test
     fun `onPartitionsAssigned adds to existing assignments`() {
-        val assignments = AtomicReference<Partitions>(setOf(p0))
-        val handler = handler(assignments = assignments)
+        val handler = handler()
+        handler.onPartitionsAssigned(mockContext(), setOf(p0))
 
         handler.onPartitionsAssigned(mockContext(), setOf(p1))
 
-        assertEquals(setOf(p0, p1), assignments.load())
+        assertEquals(setOf(p0, p1), handler.assignments())
     }
 
     @Test
     fun `onPartitionsAssigned applies pending seeks for assigned partitions`() {
-        val assignments = AtomicReference<Partitions>(emptySet())
         val pendingSeeks = AtomicReference<Offsets>(mapOf(p0 to 100L, p1 to 200L, p2 to 300L))
         val seeks = mutableMapOf<Partition, Long>()
         val context = mockContext(onSeek = { partition, offset -> seeks[partition] = offset })
 
         val handler = handler(
-            assignments = assignments,
             pendingSeeks = pendingSeeks,
         )
         handler.onPartitionsAssigned(context, setOf(p0, p1))
 
-        assertEquals(setOf(p0, p1), assignments.load())
+        assertEquals(setOf(p0, p1), handler.assignments())
         assertEquals(mapOf(p0 to 100L, p1 to 200L), seeks, "Should seek only assigned partitions")
         assertTrue(pendingSeeks.load().isEmpty(), "pendingSeeks should be cleared")
     }
 
     @Test
     fun `onPartitionsAssigned pauses if consumer is paused`() {
-        val assignments = AtomicReference<Partitions>(emptySet())
         val pausedPartitions = mutableSetOf<Partition>()
         val context = mockContext(onPause = { pausedPartitions.addAll(it) })
 
-        val handler = handler(assignments = assignments, paused = { true })
+        val handler = handler(paused = { true })
         handler.onPartitionsAssigned(context, setOf(p0, p1))
 
         assertEquals(setOf(p0, p1), pausedPartitions)
@@ -130,11 +123,10 @@ class RebalanceHandlerTest {
 
     @Test
     fun `onPartitionsAssigned does not pause if consumer is not paused`() {
-        val assignments = AtomicReference<Partitions>(emptySet())
         var pauseCalled = false
         val context = mockContext(onPause = { pauseCalled = true })
 
-        val handler = handler(assignments = assignments, paused = { false })
+        val handler = handler(paused = { false })
         handler.onPartitionsAssigned(context, setOf(p0))
 
         assertEquals(false, pauseCalled)
@@ -142,61 +134,53 @@ class RebalanceHandlerTest {
 
     @Test
     fun `onPartitionsAssigned seeds committer for past-end partitions`() {
-        val assignments = AtomicReference<Partitions>(emptySet())
         val ends = AtomicReference<Positions>(setOf(Position(p0, 10L), Position(p1, 100L)))
-        val seeds = mutableMapOf<Partition, Long>()
         val context = mockContext(onPosition = { p -> if (p == p0) 15L else 5L })
 
-        val handler = handler(
-            assignments = assignments,
-            ends = ends,
-            committerRef = { mockCommitter(onSeed = { seeds.putAll(it) }) },
-        )
-        handler.onPartitionsAssigned(context, setOf(p0, p1))
+        val handler = handler(ends = ends)
+        val seeds = handler.onPartitionsAssigned(context, setOf(p0, p1))
 
         assertEquals(mapOf(p0 to 11L), seeds, "p0 is past end offset (15 > 10), should seed offset+1")
     }
 
     @Test
     fun `onPartitionsRevoked does not commit when no offsets for revoked partitions`() {
-        val assignments = AtomicReference<Partitions>(setOf(p0, p1))
         val committed = mutableListOf<Offsets>()
         val committer = BufferedCommitter(
             commit = Committer.Commit { Mono.just(it) },
             assignments = { setOf(p0, p1) },
             instanceId = "test",
-            topicPartitions = setOf(p0, p1),
             log = log,
         )
         committer.markProcessed(Position(p0, 5L)).block()
 
         val context = mockContext(onCommit = { committed.add(it) })
-        val handler = handler(assignments = assignments, committerRef = { committer })
-        handler.onPartitionsRevoked(context, setOf(p1))
+        val handler = handler()
+        handler.onPartitionsAssigned(mockContext(), setOf(p0, p1))
+        handler.onPartitionsRevoked(context, setOf(p1), committer.processedOffsets)
 
         assertTrue(committed.isEmpty(), "Should not commit for partitions without processed offsets")
-        assertEquals(setOf(p0), assignments.load(), "p1 should be removed, p0 remains")
+        assertEquals(setOf(p0), handler.assignments(), "p1 should be removed, p0 remains")
     }
 
     @Test
     fun `onPartitionsRevoked with partial overlap commits only matching offsets`() {
-        val assignments = AtomicReference<Partitions>(setOf(p0, p1, p2))
         val committed = mutableListOf<Offsets>()
         val committer = BufferedCommitter(
             commit = Committer.Commit { Mono.just(it) },
             assignments = { setOf(p0, p1, p2) },
             instanceId = "test",
-            topicPartitions = setOf(p0, p1, p2),
             log = log,
         )
         committer.markProcessed(Position(p0, 5L)).block()
         committer.markProcessed(Position(p2, 15L)).block()
 
         val context = mockContext(onCommit = { committed.add(it) })
-        val handler = handler(assignments = assignments, committerRef = { committer })
-        handler.onPartitionsRevoked(context, setOf(p0, p1))
+        val handler = handler()
+        handler.onPartitionsAssigned(mockContext(), setOf(p0, p1, p2))
+        handler.onPartitionsRevoked(context, setOf(p0, p1), committer.processedOffsets)
 
-        assertEquals(setOf(p2), assignments.load(), "p0 and p1 removed")
+        assertEquals(setOf(p2), handler.assignments(), "p0 and p1 removed")
         assertEquals(1, committed.size, "One commit for partitions with offsets")
         assertEquals(mapOf(p0 to 6L), committed[0], "Only p0 has processed offsets")
     }
@@ -223,64 +207,53 @@ class RebalanceHandlerTest {
     @Test
     fun `onPartitionsAssigned does not seed when position below end offset`() {
         val ends = AtomicReference<Positions>(setOf(Position(p0, 100L)))
-        var seedCalled = false
         val context = mockContext(onPosition = { 50L })
-        val handler = handler(
-            ends = ends,
-            committerRef = { mockCommitter(onSeed = { seedCalled = true }) },
-        )
-        handler.onPartitionsAssigned(context, setOf(p0))
-        assertEquals(false, seedCalled, "Should not seed when position is below end offset")
+        val handler = handler(ends = ends)
+        val seeds = handler.onPartitionsAssigned(context, setOf(p0))
+        assertTrue(seeds.isEmpty(), "Should not seed when position is below end offset")
     }
 
     @Test
     fun `onPartitionsAssigned with no ends loaded does not seed`() {
-        var seedCalled = false
         val context = mockContext()
-        val handler = handler(
-            committerRef = { mockCommitter(onSeed = { seedCalled = true }) },
-        )
-        handler.onPartitionsAssigned(context, setOf(p0))
-        assertEquals(false, seedCalled, "Should not seed when ends is empty")
+        val handler = handler()
+        val seeds = handler.onPartitionsAssigned(context, setOf(p0))
+        assertTrue(seeds.isEmpty(), "Should not seed when ends is empty")
     }
 
     @Test
     fun `onPartitionsAssigned with empty partition set is a no-op`() {
-        val assignments = AtomicReference<Partitions>(setOf(p0))
         val context = mockContext(
             onPause = { fail("should not pause") },
             onSeek = { _, _ -> fail("should not seek") },
         )
-        val handler = handler(assignments = assignments, paused = { true })
+        val handler = handler(paused = { true })
+        handler.onPartitionsAssigned(mockContext(), setOf(p0))
         handler.onPartitionsAssigned(context, emptySet())
-        assertEquals(setOf(p0), assignments.load(), "Assignments unchanged")
+        assertEquals(setOf(p0), handler.assignments(), "Assignments unchanged")
     }
 
     @Test
     fun `processing then revoke commits processed offsets via context`() {
-        val assignments = AtomicReference<Partitions>(setOf(p0, p1))
         val committed = mutableListOf<Offsets>()
         val committer = BufferedCommitter(
             commit = Committer.Commit { Mono.just(it) },
-            assignments = { assignments.load() },
+            assignments = { setOf(p0, p1) },
             instanceId = "test-concurrent",
-            topicPartitions = setOf(p0, p1),
             log = log,
         )
         committer.start()
+        val handler = handler()
+        handler.onPartitionsAssigned(mockContext(), setOf(p0, p1))
 
         val context = mockContext(onCommit = { committed.add(it) })
-        val handler = handler(
-            assignments = assignments,
-            committerRef = { committer },
-        )
 
         committer.markProcessed(Position(p0, 5L)).block()
         committer.markProcessed(Position(p1, 10L)).block()
 
-        handler.onPartitionsRevoked(context, setOf(p0))
+        handler.onPartitionsRevoked(context, setOf(p0), committer.processedOffsets)
 
-        assertEquals(setOf(p1), assignments.load(), "p0 should be removed from assignments")
+        assertEquals(setOf(p1), handler.assignments(), "p0 should be removed from assignments")
         assertEquals(1, committed.size, "Should have one commit via context")
         val flushCommit = committed[0]
         assertEquals(setOf(p0), flushCommit.keys, "flush should include p0")
@@ -291,28 +264,27 @@ class RebalanceHandlerTest {
 
     @Test
     fun `concurrent processing with full revoke commits all offsets via context`() {
-        val assignments = AtomicReference<Partitions>(setOf(p0, p1, p2))
         val committed = mutableListOf<Offsets>()
         val committer = BufferedCommitter(
             commit = Committer.Commit { Mono.just(it) },
-            assignments = { assignments.load() },
+            assignments = { setOf(p0, p1, p2) },
             instanceId = "test-concurrent-full",
-            topicPartitions = setOf(p0, p1, p2),
             log = log,
         )
         committer.start()
+        val handler = handler()
+        handler.onPartitionsAssigned(mockContext(), setOf(p0, p1, p2))
 
         val context = mockContext(onCommit = { committed.add(it) })
-        val handler = handler(
-            assignments = assignments,
-            committerRef = { committer },
-        )
 
         val processingStarted = CountDownLatch(1)
         val processingActive = AtomicBoolean(true)
 
         val processingThread = Thread {
-            var i = 0
+            committer.markProcessed(Position(p0, 0L)).block()
+            committer.markProcessed(Position(p1, 0L)).block()
+            committer.markProcessed(Position(p2, 0L)).block()
+            var i = 1
             processingStarted.countDown()
             while (processingActive.get()) {
                 committer.markProcessed(Position(p0, i.toLong())).block()
@@ -324,12 +296,12 @@ class RebalanceHandlerTest {
         processingThread.start()
         processingStarted.await()
 
-        handler.onPartitionsRevoked(context, setOf(p0, p1, p2))
+        handler.onPartitionsRevoked(context, setOf(p0, p1, p2), committer.processedOffsets)
 
         processingActive.set(false)
         processingThread.join(2000)
 
-        assertTrue(assignments.load().isEmpty(), "All partitions should be removed")
+        assertTrue(handler.assignments().isEmpty(), "All partitions should be removed")
         assertEquals(1, committed.size, "Should have one commit via context")
         val flushCommit = committed[0]
         assertEquals(setOf(p0, p1, p2), flushCommit.keys,
@@ -341,14 +313,10 @@ class RebalanceHandlerTest {
     }
 
     private fun handler(
-        assignments: AtomicReference<Partitions> = AtomicReference(emptySet()),
         pendingSeeks: AtomicReference<Offsets> = AtomicReference(emptyMap()),
         ends: AtomicReference<Positions> = AtomicReference(emptySet()),
         paused: () -> Boolean = { false },
-        committerRef: () -> Committer = { mockCommitter() },
-    ) = CoordinatingRebalanceHandler(
-        committerRef = committerRef,
-        assignments = assignments,
+    ) = CoordinatingPartitionManager(
         pendingSeeks = pendingSeeks,
         ends = ends,
         paused = paused,
@@ -363,7 +331,7 @@ class RebalanceHandlerTest {
         override fun seedOffsets(offsets: Offsets) = onSeed(offsets)
         override val positions = Flux.empty<Position>()
         override val processedOffsets: Offsets get() = emptyMap()
-        override fun start(): Disposable = throw UnsupportedOperationException()
+        override fun start() = throw UnsupportedOperationException()
         override fun stop(): Mono<Void> = Mono.empty()
     }
 

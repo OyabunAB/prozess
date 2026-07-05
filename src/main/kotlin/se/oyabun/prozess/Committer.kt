@@ -57,7 +57,7 @@ interface Committer {
     val processedOffsets: Offsets
 
     /** Start the buffered commit pipeline on its own scheduler. Throws [CommitterAlreadyRunning] if already started. */
-    fun start(): Disposable
+    fun start()
 
     /**
      * Gracefully stop: complete the internal sink, await pipeline drain,
@@ -86,7 +86,6 @@ interface Committer {
  * @param commit           Commits offsets to Kafka.
  * @param assignments      Returns the current set of assigned partitions.
  * @param instanceId       Label used in logging and scheduler thread names.
- * @param topicPartitions  The full set of subscribed topic partitions (for logging).
  * @param log              Logger.
  * @param bufferSize       Capacity of the internal position sink buffer.
  * @param maxBatchSize     Max number of positions per commit batch.
@@ -97,7 +96,6 @@ internal class BufferedCommitter(
     private val commit: Committer.Commit,
     private val assignments: () -> Partitions,
     private val instanceId: String,
-    private val topicPartitions: Partitions,
     private val log: Logger,
     private val bufferSize: Int = 500,
     private val maxBatchSize: Int = 25,
@@ -136,11 +134,11 @@ internal class BufferedCommitter(
         }
     }
 
-    override fun start(): Disposable {
+    override fun start() {
         if (!running.compareAndSet(false, true)) throw CommitterAlreadyRunning("$instanceId already running")
         val scheduler = Schedulers.newSingle("$instanceId-committer")
         schedulerRef.store(scheduler)
-        val d = processed.asFlux()
+        disposable = processed.asFlux()
             .bufferTimeout(maxBatchSize, maxBatchTime)
             .publishOn(scheduler)
             .concatMap { batch ->
@@ -151,8 +149,8 @@ internal class BufferedCommitter(
                     val offsets = current.groupBy({ it.partition }, { it.offset })
                     val latest = offsets.mapValues { it.value.max() + 1 }
                     commit.commit(latest)
-                        .doOnError { cause -> log.kafka.commitFailed(instanceId, topicPartitions, cause) }
-                        .doOnSuccess { log.kafka.committed(instanceId, topicPartitions) }
+                        .doOnError { cause -> log.kafka.commitFailed(instanceId, latest.keys, cause) }
+                        .doOnSuccess { log.kafka.committed(instanceId, latest.keys) }
                         .withRetries(id = instanceId, retryOn = anyException, maxAttempts = infiniteRetries)
                 }
             }
@@ -163,8 +161,6 @@ internal class BufferedCommitter(
                 { signalCompletion(it) },
                 { signalCompletion() },
             )
-        disposable = d
-        return d
     }
 
     override fun stop(): Mono<Void> {

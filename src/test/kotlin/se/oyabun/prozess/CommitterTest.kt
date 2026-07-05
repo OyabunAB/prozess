@@ -63,7 +63,6 @@ class CommitterTest {
             },
             assignments = { setOf(p0) },
             instanceId = "test-batch-size",
-            topicPartitions = setOf(p0),
             log = Logging.logger { },
             bufferSize = 500,
             maxBatchSize = 3,
@@ -91,7 +90,6 @@ class CommitterTest {
             },
             assignments = { setOf(p0) },
             instanceId = "test-batch-time",
-            topicPartitions = setOf(p0),
             log = Logging.logger { },
             bufferSize = 500,
             maxBatchSize = 100,
@@ -117,7 +115,6 @@ c.start()
             },
             assignments = { setOf(p0) },
             instanceId = "test-filter",
-            topicPartitions = setOf(p0, p1),
             log = Logging.logger { },
             bufferSize = 500,
             maxBatchSize = 2,
@@ -152,7 +149,6 @@ c.start()
             },
             assignments = { setOf(p0) },
             instanceId = "test-retry",
-            topicPartitions = setOf(p0),
             log = Logging.logger { },
             bufferSize = 500,
             maxBatchSize = 1,
@@ -176,7 +172,6 @@ c.start()
             },
             assignments = { setOf(p0) },
             instanceId = "test-graceful",
-            topicPartitions = setOf(p0, p1),
             log = Logging.logger { },
             bufferSize = 500,
             maxBatchSize = 100,
@@ -213,7 +208,6 @@ c.start()
             },
             assignments = { setOf(p0) },
             instanceId = "test-flush-stop",
-            topicPartitions = setOf(p0),
             log = Logging.logger { },
             bufferSize = 500,
             maxBatchSize = 100,
@@ -237,7 +231,6 @@ c.start()
             },
             assignments = { setOf(p0) },
             instanceId = "test-idempotent",
-            topicPartitions = setOf(p0),
             log = Logging.logger { },
         )
         c.start()
@@ -260,7 +253,6 @@ c.start()
             },
             assignments = { setOf(p0) },
             instanceId = "test-seq",
-            topicPartitions = setOf(p0),
             log = Logging.logger { },
             bufferSize = 500,
             maxBatchSize = 3,
@@ -285,7 +277,6 @@ c.start()
             },
             assignments = { setOf(p0) },
             instanceId = "test-double-stop",
-            topicPartitions = setOf(p0),
             log = Logging.logger { },
             bufferSize = 500,
             maxBatchSize = 100,
@@ -296,6 +287,28 @@ c.start()
         c.stop().block()
         c.stop().block()
         assertFalse(commitLog.isEmpty(), "Expected commit from first stop")
+    }
+
+    @Test
+    fun `processedOffsets is only mutated by markProcessed and seedOffsets`() {
+        val c = BufferedCommitter(
+            commit = Committer.Commit { Mono.just(it) },
+            assignments = { setOf(p0) },
+            instanceId = "test-invariant",
+            log = Logging.logger { },
+        )
+        assertEquals(emptyMap(), c.processedOffsets)
+
+        c.seedOffsets(mapOf(p0 to 42L))
+        assertEquals(mapOf(p0 to 42L), c.processedOffsets)
+
+        c.markProcessed(Position(p0, 50L)).block()
+        assertEquals(mapOf(p0 to 51L), c.processedOffsets)
+
+        c.start()
+        assertEquals(mapOf(p0 to 51L), c.processedOffsets)
+        c.stop().block()
+        assertEquals(mapOf(p0 to 51L), c.processedOffsets)
     }
 
     @Test
@@ -318,7 +331,7 @@ c.start()
         },
         assignments = { setOf(p0, p1) },
         instanceId = "test",
-        topicPartitions = setOf(p0, p1),
+
         log = Logging.logger { },
     )
 }

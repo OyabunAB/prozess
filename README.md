@@ -4,29 +4,34 @@ Reactive Kafka consumer/producer built on Reactor and kotlinx-coroutines.
 
 ## Consumer Architecture
 
-The consumer is split into three independent pipelines that share an in-memory buffer:
+The consumer has two independent pipelines sharing an in-memory buffer:
 
 ```
-   Poller                        Emitter                          Committer
-  ┌─────────────────────┐       ┌──────────────────────┐        ┌──────────────────────┐
-  │ Flux.interval       │       │ buffer.asFlux()      │        │ Sinks.Many<Position> │
-  │  ─► client.poll()   │──buf─►│  ─► concatMap(emit)  │──pos──►│  ─► bufferTimeout()  │
-  │  ─► buffer.offer()  │       │  ─► filter partition │        │  ─► client.commit()  │
-  └─────────┬───────────┘       └──────────────────────┘        └──────────────────────┘
-            │
-       pause/resume
-  (via buffer callbacks)
+   Poller                         Committer
+  ┌─────────────────────┐        ┌──────────────────────┐
+  │ Flux.interval       │        │ Sinks.Many<Position> │
+  │  ─► client.poll()   │──buf──►│  ─► bufferTimeout()  │
+  │  ─► buffer.offer()  │ filter │  ─► client.commit()  │
+  └─────────┬───────────┘   │    └──────────────────────┘
+            │               │
+       pause/resume         ▼
+  (via buffer callbacks)  Processing chain
+                          (groupBy, flatMap,
+                           deserialize, process,
+                           committer.markProcessed)
 ```
 
-Each pipeline runs on its own single-thread scheduler, pinned to respect KafkaConsumer thread confinement.
+The poller runs on its own single-thread scheduler. The committer runs its commit pipeline on another. The processing chain between buffer and committer is composed inline in `StreamingConsumer.start()` — no separate scheduler, reactive back-pressure propagates from the processing chain through the buffer to the poller.
+
+Partition assignment filtering happens inline via `.filter { it.position.partition in partitionManager.assignments() }` on `buffer.asFlux()` — unassigned records are silently dropped before reaching the processing chain.
 
 ### ReceivedBuffer
 
-The `ReceivedBuffer` interface (see [Buffering.kt](src/main/kotlin/se/oyabun/prozess/Buffering.kt)) is the shared contract between Poller and Emitter:
+The `ReceivedBuffer` interface (see [Buffering.kt](src/main/kotlin/se/oyabun/prozess/Buffering.kt)) connects the poller to the processing chain:
 
-- `offer()` — Poller writes records into the buffer. If a subscriber has demand, records are drained immediately.
+- `offer()` — Poller writes records into the buffer.
 - `size` — O(1) counter used for watermark back-pressure decisions.
-- `asFlux()` — reactive stream view; Emitter subscribes here instead of polling.
+- `asFlux()` — reactive stream view consumed by the processing pipeline.
 
 #### Back-pressure
 
@@ -41,7 +46,7 @@ The `InMemoryReceivedBuffer` implementation owns the back-pressure contract via 
 
 The `highWaterMark` equals `config.maxPollRecords` (default 500). The `lowWaterMark` is `maxPollRecords / 4` (default 125).
 
-When the buffer reaches `highWaterMark`, the `onPause` callback pauses all assigned partitions. Kafka buffers data server-side but stops returning it on `poll()` calls. The poller continues ticking — each tick calls `poll()` (returns empty). The emitter drains the buffer and the `onResume` callback fires once the buffer drops below `lowWaterMark`.
+When the buffer reaches `highWaterMark`, the `onPause` callback pauses all assigned partitions. Kafka buffers data server-side but stops returning it on `poll()` calls. The poller continues ticking — each tick calls `poll()` (returns empty). The processing chain drains the buffer and the `onResume` callback fires once the buffer drops below `lowWaterMark`.
 
 This prevents the buffer from growing unbounded while downstream processing catches up, without blocking the poller thread. The pause/resume contract lives in one place: the buffer.
 
@@ -91,54 +96,6 @@ The Poller (`BufferedPoller`) runs the poll loop on a single scheduler thread, c
 - `stop()` fires `shutdownSink`, awaits `done` via `done.asMono()`, then disposes subscription and scheduler in `doFinally` — safe to call after pipeline completion (returns `Mono.empty()` if already stopped)
 - `pause()`/`resume()` check `running` before calling the SAM operation — the SAM operation itself is not thread-safe, but it runs on the caller's thread, and the underlying Kafka client serialises access via its own single-thread scheduler
 - `disposable` is always non-null — default `Disposable { }` before `start()` sets the real one
-
-### Emitter
-
-The Emitter (`BufferedEmitter`) subscribes to `buffer.asFlux()` and pushes received records downstream via the processing chain. It runs on its own scheduler via `publishOn`.
-
-No timer, no manual poll loop, no demand checking — Reactor handles back-pressure through the `asFlux` stream. The buffer's `onResume` callback handles partition resume when the buffer drains.
-
-#### Lifecycle
-
-```
-       start()
-         │
-         ▼
-  ┌─────────────┐
-  │   RUNNING   │
-  │             │◄─────────────────┐
-  │  asFlux()   │  retry on error  │
-  │  ─► emit()  │──────────────────┘
-  │  ─► resume? │   (retryWhen)
-  │  (buffer)   │
-  └──────┬──────┘
-         │
-    shutdown signal  or  stop()
-         │
-         ▼
-  ┌─────────────┐
-  │  COMPLETED  │  ─► done signal emitted
-  │             │  ─► running = false
-  └─────────────┘
-```
-
-#### Use Cases
-
-| # | Use Case | Trigger | Behaviour |
-|---|----------|---------|-----------|
-| 1 | Normal emit | `asFlux` emits record via subscriber demand | Checks partition is still assigned, calls `emit.emit(received)` downstream |
-| 2 | Unassigned partition | Record's partition not in current assignments | Record is silently skipped (not emitted) |
-| 3 | Graceful shutdown | `shutdown` Mono emits | `takeUntilOther` completes the Flux, subscriber completion handler fires `done` signal |
-| 4 | Pipeline error | Downstream operator throws (e.g. `emit`, `assignments`) | `retryWhen` with exponential backoff (500ms initial, 30s max, infinite attempts) re-subscribes to `asFlux()` |
-| 5 | stop() after completion | Consumer calls `stop()` | Fires internal `shutdownSink`, awaits `done` signal, then disposes subscription and scheduler. Idempotent |
-| 6 | Double start | `start()` while running | Throws `EmitterAlreadyRunning` |
-
-#### Thread Safety
-
-- `running` flag uses `AtomicBoolean` — `start()`/`stop()` are safe to call from different threads
-- `stop()` fires `shutdownSink`, awaits `done` via `done.asMono()`, then disposes subscription and scheduler in `doFinally` — safe to call after pipeline completion (returns `Mono.empty()` if already stopped)
-- `disposable` is always non-null — default `Disposable { }` before `start()` sets the real one
-- The shared `ReceivedBuffer` is accessed from both Poller (writer via `offer()`) and Emitter (reader via `asFlux()`) — `InMemoryReceivedBuffer` uses `ConcurrentLinkedQueue` and is thread-safe
 
 ### Committer
 

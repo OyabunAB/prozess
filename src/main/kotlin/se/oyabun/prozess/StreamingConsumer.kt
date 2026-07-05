@@ -17,15 +17,17 @@ import reactor.core.publisher.Mono.zip
 import reactor.core.publisher.Sinks
 import reactor.util.concurrent.Queues
 import reactor.util.retry.Retry
-import se.oyabun.prozess.Retrying.infiniteRetries
-import se.oyabun.prozess.Retrying.withRetries
 import se.oyabun.prozess.EndOffset.CatchUp
 import se.oyabun.prozess.Prozess
+import se.oyabun.prozess.Retrying.infiniteRetries
+import se.oyabun.prozess.Retrying.withRetries
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.concurrent.atomics.fetchAndUpdate
 import kotlin.concurrent.atomics.update
+import org.apache.kafka.clients.consumer.ConsumerRebalanceListener
+import org.apache.kafka.common.TopicPartition
 import kotlin.time.Clock
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
@@ -39,30 +41,10 @@ class StreamingConsumer<M>(
     private val deserializer: Prozess.Deserializer<M>,
     private val process: ConsumerProcess<M> = { _,_ -> },
     instance: String? = "consumer",
-    private var committer: Committer = object : Committer {
-        override fun markProcessed(position: Position) = Mono.just(position)
-        override fun seedOffsets(offsets: Offsets) {}
-        override val positions: Flux<Position> get() = Flux.empty()
-        override val processedOffsets: Offsets get() = emptyMap()
-        override fun start(): Disposable = Disposable { }
-        override fun stop(): Mono<Void> = empty()
-    },
-    private var emitter: Emitter = object : Emitter {
-        override fun start(): Disposable = Disposable { }
-        override fun stop(): Mono<Void> = empty()
-    },
-    private var poller: Poller = object : Poller {
-        override fun start(): Disposable = Disposable { }
-        override fun stop(): Mono<Void> = empty()
-        override fun pause() {}
-        override fun resume() {}
-        override val isRunning: Boolean get() = false
-    },
 ) {
     private val log = Logging.logger { }
     private val instanceId = "[$instance ${config.topics} consumer]"
     private val client = ThreadsafeKafkaClient(config)
-    private val assignments = AtomicReference<Partitions>(emptySet())
     private val ends = AtomicReference<Positions>(emptySet())
     private val started = AtomicBoolean(false)
     private val highWaterMark = config.maxPollRecords
@@ -71,13 +53,45 @@ class StreamingConsumer<M>(
     private val paused = java.util.concurrent.atomic.AtomicBoolean(false)
     private val closeSignal = Sinks.one<Unit>()
     private val disposed = java.util.concurrent.atomic.AtomicBoolean(false)
-    private val rebalanceHandler: RebalanceHandler = CoordinatingRebalanceHandler(
-        committerRef = { committer },
-        assignments = assignments,
+    private val pollerShutdown = Sinks.one<Unit>()
+    private val pollingDone = Sinks.one<Unit>()
+    private val buffer = InMemoryReceivedBuffer(
+        delegate = Queues.unbounded<Received>().get(),
+        highWaterMark = highWaterMark,
+        lowWaterMark = lowWaterMark,
+        onPause = {
+            val current = partitionManager.assignments()
+            if (current.isNotEmpty()) client.pause(current).subscribe()
+        },
+        onResume = {
+            val current = partitionManager.assignments()
+            if (current.isNotEmpty()) client.resume(current).subscribe()
+        },
+    )
+    private val partitionManager = CoordinatingPartitionManager(
         pendingSeeks = pendingSeeks,
         ends = ends,
-        paused = { paused.get() },
+        paused = paused::get,
         instanceId = instanceId,
+        log = log,
+    )
+    private val committer: Committer = BufferedCommitter(
+        commit = { offsets -> client.commit(offsets, "$instanceId@${Clock.System.now()}") },
+        assignments = partitionManager::assignments,
+        instanceId = instanceId,
+        log = log,
+        bufferSize = config.maxPollRecords,
+    )
+    private val poller: Poller = BufferedPoller(
+        poll = client::poll,
+        pause = client::pause,
+        resume = client::resume,
+        buffer = buffer,
+        assignments = partitionManager::assignments,
+        instanceId = instanceId,
+        pollInterval = config.pollInterval,
+        shutdownSink = pollerShutdown,
+        done = pollingDone,
         log = log,
     )
 
@@ -86,6 +100,8 @@ class StreamingConsumer<M>(
         until: EndOffset = EndOffset.Continuous,
     ) {
         check(started.compareAndSet(false, true)) { "$instanceId start() called more than once" }
+        poller.start()
+        committer.start()
         val complete = completionSignal()
         val sync = syncSignal(until, complete)
         incomingFeed(sync, closeSignal.asMono(), from, until)
@@ -106,7 +122,6 @@ class StreamingConsumer<M>(
             client = client,
             closeSignal = closeSignal,
             poller = poller,
-            emitter = emitter,
             committer = committer,
             instanceId = instanceId,
             log = log,
@@ -134,9 +149,23 @@ class StreamingConsumer<M>(
         .flatMapMany { topicPartitions ->
             val awaitSubscription = client.subscribe(
                 config.topics,
-                rebalanceHandler,
+                object : ConsumerRebalanceListener {
+                    override fun onPartitionsRevoked(partitions: MutableCollection<TopicPartition>) {
+                        val ctx = client.rebalanceContext()
+                        val parts = partitions.map { Partition(it.partition(), Topic(it.topic())) }.toSet()
+                        partitionManager.onPartitionsRevoked(ctx, parts, committer.processedOffsets)
+                    }
+                    override fun onPartitionsAssigned(partitions: MutableCollection<TopicPartition>) {
+                        val ctx = client.rebalanceContext()
+                        val parts = partitions.map { Partition(it.partition(), Topic(it.topic())) }.toSet()
+                        val seeds = partitionManager.onPartitionsAssigned(ctx, parts)
+                        if (seeds.isNotEmpty()) committer.seedOffsets(seeds)
+                    }
+                },
             )
-            val messages = messagesFeed(topicPartitions, sync)
+            val messages = buffer.asFlux()
+                .filter { it.position.partition in partitionManager.assignments() }
+                .takeUntilOther(sync)
             val synchronizedMessages = Flux.merge(messages, sync)
             initOffsets(topicPartitions, from, until)
                 .then(awaitSubscription)
@@ -214,7 +243,7 @@ class StreamingConsumer<M>(
 
     private fun completionSignal(): Mono<Void> = committer.positions
         .map {
-            assignments.load().all { partition ->
+            partitionManager.assignments().all { partition ->
                 val lastPosition = ends.load().find { it.partition == partition }
                 lastPosition == null || (committer.processedOffsets[partition] ?: 0L) >= lastPosition.offset
             }
@@ -226,71 +255,7 @@ class StreamingConsumer<M>(
         is EndOffset.Continuous -> never()
     }
 
-    private fun messagesFeed(
-        topicPartitions: Partitions,
-        sync: Mono<Received>,
-    ): Flux<Received> {
-        val sink = Sinks.many().unicast().onBackpressureBuffer<Received>()
-        val buffer = InMemoryReceivedBuffer(
-            delegate = Queues.unbounded<Received>().get(),
-            highWaterMark = highWaterMark,
-            lowWaterMark = lowWaterMark,
-            onPause = {
-                val current = assignments.load()
-                if (current.isNotEmpty()) client.pause(current).subscribe()
-            },
-            onResume = {
-                val current = assignments.load()
-                if (current.isNotEmpty()) client.resume(current).subscribe()
-            },
-        )
-        val pollerShutdownSink = Sinks.one<Unit>()
-        val emitterShutdownSink = Sinks.one<Unit>()
-        val pollingDone = Sinks.one<Unit>()
-        val emittingDone = Sinks.one<Unit>()
-
-        val c = BufferedCommitter(
-            commit = { offsets -> client.commit(offsets, "$instanceId@${Clock.System.now()}") },
-            assignments = { assignments.load() },
-            instanceId = instanceId,
-            topicPartitions = topicPartitions,
-            log = log,
-            bufferSize = config.maxPollRecords,
-        )
-        c.start()
-        committer = c
-
-        val e = BufferedEmitter(
-            emit = { received -> sink.safeEmit(received, instanceId).thenReturn(received) },
-            buffer = buffer,
-            assignments = { assignments.load() },
-            instanceId = instanceId,
-            shutdownSink = emitterShutdownSink,
-            done = emittingDone,
-            log = log,
-        )
-        e.start()
-        emitter = e
-
-        val p = BufferedPoller(
-            poll = { client.poll() },
-            pause = { client.pause(it) },
-            resume = { client.resume(it) },
-            buffer = buffer,
-            assignments = { assignments.load() },
-            instanceId = instanceId,
-            pollInterval = config.pollInterval,
-            shutdownSink = pollerShutdownSink,
-            done = pollingDone,
-            log = log,
-        )
-        p.start()
-        poller = p
-
-        return sink.asFlux().takeUntilOther(sync)
-    }
-
-    fun hasNoAssignments(): Boolean = assignments.load().isEmpty()
+    fun hasNoAssignments(): Boolean = partitionManager.assignments().isEmpty()
 
     fun position(partition: Partition): Long =
         client.positionOf(partition).block() ?: throw ConsumerNotActive("$instanceId position() failed for $partition")

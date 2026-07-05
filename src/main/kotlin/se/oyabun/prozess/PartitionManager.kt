@@ -26,20 +26,21 @@ import kotlin.concurrent.atomics.update
  *   and seeds the committer for partitions whose position is past their end offset
  *   (catch-up completion).
  */
-internal interface RebalanceHandler {
+internal interface PartitionManager {
 
     /**
      * Invoked when partitions are revoked from this consumer.
      *
-     * The [Committer.processedOffsets] are snapshotted and committed synchronously
-     * via [RebalanceContext.commit] -- this is the last opportunity to commit offsets
-     * for these partitions before another consumer takes over.  The partitions are
+     * The given [processedOffsets] are filtered for the revoked [partitions] and
+     * committed synchronously via [RebalanceContext.commit] -- the last opportunity
+     * to commit offsets before another consumer takes over.  The partitions are
      * then removed from the assignment set.
      *
-     * @param context  direct-access bridge to the underlying KafkaConsumer.
-     * @param partitions  the set of revoked partitions.
+     * @param context          direct-access bridge to the underlying KafkaConsumer.
+     * @param partitions       the set of revoked partitions.
+     * @param processedOffsets  the latest processed offsets snapshot.
      */
-    fun onPartitionsRevoked(context: RebalanceContext, partitions: Partitions)
+    fun onPartitionsRevoked(context: RebalanceContext, partitions: Partitions, processedOffsets: Offsets)
 
     /**
      * Invoked when partitions are assigned to this consumer.
@@ -48,25 +49,22 @@ internal interface RebalanceHandler {
      * EARLIEST or AT_TIMESTAMP start-offsets) are applied for the newly assigned
      * partitions.  If the consumer is in a paused state, the new partitions are
      * paused immediately.  For catch-up mode, partitions whose current position
-     * exceeds their end offset are seeded into the committer as "completed".
+     * exceeds their end offset are returned so the caller can seed the committer.
      *
-     * @param context  direct-access bridge to the underlying KafkaConsumer.
+     * @param context     direct-access bridge to the underlying KafkaConsumer.
      * @param partitions  the set of newly assigned partitions.
+     * @return offsets to seed into the committer (catch-up completion).
      */
-    fun onPartitionsAssigned(context: RebalanceContext, partitions: Partitions)
+    fun onPartitionsAssigned(context: RebalanceContext, partitions: Partitions): Offsets
 }
 
 /**
- * Standard [RebalanceHandler] implementation.
+ * Standard [PartitionManager] implementation.
  *
- * Owns the coordination logic extracted from [StreamingConsumer].  All mutable
- * state ([assignments], [pendingSeeks], [ends]) is passed as [AtomicReference]
- * to guarantee visibility across threads.  The [committerRef] is a lambda that
- * resolves the current [Committer] at callback time (always non-null — the
- * committer exists before rebalance callbacks fire in the subscription chain).
+ * Owns the coordination logic extracted from [StreamingConsumer].  Owns the
+ * [assignments] set; [pendingSeeks] and [ends] are still shared via
+ * [AtomicReference] for cross-component visibility.
  *
- * @param committerRef  resolves the current [Committer].
- * @param assignments   the current set of assigned partitions.
  * @param pendingSeeks  one-shot seeks (reset to `emptyMap()` on first assign).
  * @param ends          known end-offsets for catch-up detection.
  * @param paused        whether the consumer is externally paused.
@@ -74,19 +72,21 @@ internal interface RebalanceHandler {
  * @param log           logger.
  */
 @OptIn(ExperimentalAtomicApi::class)
-internal class CoordinatingRebalanceHandler(
-    private val committerRef: () -> Committer,
-    private val assignments: AtomicReference<Partitions>,
+internal class CoordinatingPartitionManager(
     private val pendingSeeks: AtomicReference<Offsets>,
     private val ends: AtomicReference<Positions>,
     private val paused: () -> Boolean,
     private val instanceId: String,
     private val log: Logger,
-) : RebalanceHandler {
+) : PartitionManager {
 
-    override fun onPartitionsRevoked(context: RebalanceContext, partitions: Partitions) {
+    private val assignments = AtomicReference<Partitions>(emptySet())
+
+    fun assignments(): Partitions = assignments.load()
+
+    override fun onPartitionsRevoked(context: RebalanceContext, partitions: Partitions, processedOffsets: Offsets) {
         log.kafka.revoked(instanceId, partitions)
-        val offsets = committerRef().processedOffsets.filterKeys { it in partitions }
+        val offsets = processedOffsets.filterKeys { it in partitions }
         if (offsets.isNotEmpty()) {
             context.commit(offsets)
             log.kafka.committed(instanceId, partitions)
@@ -94,7 +94,7 @@ internal class CoordinatingRebalanceHandler(
         assignments.update { it - partitions }
     }
 
-    override fun onPartitionsAssigned(context: RebalanceContext, partitions: Partitions) {
+    override fun onPartitionsAssigned(context: RebalanceContext, partitions: Partitions): Offsets {
         log.kafka.assigned(instanceId, partitions)
         assignments.update { it + partitions }
         if (paused() && partitions.isNotEmpty()) context.pause(partitions)
@@ -108,6 +108,6 @@ internal class CoordinatingRebalanceHandler(
             if (endPos != null && context.position(p) > endPos.offset) p to (endPos.offset + 1)
             else null
         }.toMap()
-        if (done.isNotEmpty()) committerRef().seedOffsets(done)
+        return done
     }
 }

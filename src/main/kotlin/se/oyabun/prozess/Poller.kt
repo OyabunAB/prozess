@@ -33,7 +33,7 @@ import kotlin.time.toJavaDuration
  */
 interface Poller {
 
-    fun start(): Disposable
+    fun start()
     fun stop(): Mono<Void>
     fun pause()
     fun resume()
@@ -75,13 +75,11 @@ internal class BufferedPoller(
     private val running = AtomicBoolean(false)
     private var disposable: Disposable = Disposable { }
 
-    override fun start(): Disposable {
+    override fun start() {
         if (!running.compareAndSet(false, true)) throw PollerAlreadyRunning("$instanceId already running")
         val scheduler = Schedulers.newSingle("$instanceId-poll")
         timer.set(scheduler)
-        val d = pollingPipeline(scheduler)
-        disposable = d
-        return d
+        disposable = pollingPipeline(scheduler)
     }
 
     override fun stop(): Mono<Void> {

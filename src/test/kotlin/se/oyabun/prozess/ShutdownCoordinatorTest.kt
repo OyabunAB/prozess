@@ -18,7 +18,7 @@ class ShutdownCoordinatorTest {
     private val log = Logging.logger { }
 
     @Test
-    fun `shutdown stops poller emitter and committer then closes client`() {
+    fun `shutdown stops poller and committer then closes client`() {
         val order = mutableListOf<String>()
         val coordinator = ShutdownCoordinator(
             client = testClient(
@@ -27,7 +27,6 @@ class ShutdownCoordinatorTest {
             ),
             closeSignal = closeSignal(),
             poller = testPoller { order.add("poller") },
-            emitter = testEmitter { order.add("emitter") },
             committer = testCommitter { order.add("committer") },
             instanceId = "test",
             log = log,
@@ -35,7 +34,7 @@ class ShutdownCoordinatorTest {
 
         coordinator.shutdown()
 
-        assertEquals(listOf("wakeup", "poller", "emitter", "committer", "close"), order)
+        assertEquals(listOf("wakeup", "poller", "committer", "close"), order)
     }
 
     @Test
@@ -44,7 +43,6 @@ class ShutdownCoordinatorTest {
             client = testClient(),
             closeSignal = closeSignal(),
             poller = testPoller { },
-            emitter = testEmitter { },
             committer = testCommitter { },
             instanceId = "test",
             log = log,
@@ -56,10 +54,13 @@ class ShutdownCoordinatorTest {
     @Test
     fun `shutdown with duration force closes when components hang`() {
         val order = mutableListOf<String>()
-        val emitter = object : Emitter {
+        val poller = object : Poller {
             private val stopped = AtomicBoolean(false)
-            override fun start(): Disposable = error("unexpected")
-            override fun stop(): Mono<Void> = if (!stopped.getAndSet(true)) order.add("emitter").let { Mono.never() } else Mono.empty()
+            override fun start() = error("unexpected")
+            override fun stop(): Mono<Void> = if (!stopped.getAndSet(true)) Mono.never() else Mono.empty()
+            override fun pause() = error("unexpected")
+            override fun resume() = error("unexpected")
+            override val isRunning: Boolean get() = !stopped.get()
         }
         val coordinator = ShutdownCoordinator(
             client = testClient(
@@ -67,8 +68,7 @@ class ShutdownCoordinatorTest {
                 onClose = { order.add("close"); Mono.empty() },
             ),
             closeSignal = closeSignal(),
-            poller = testPoller { order.add("poller") },
-            emitter = emitter,
+            poller = poller,
             committer = testCommitter { order.add("committer") },
             instanceId = "test",
             log = log,
@@ -87,7 +87,6 @@ class ShutdownCoordinatorTest {
             client = testClient(onClose = { completed.set(true); Mono.empty() }),
             closeSignal = closeSignal(),
             poller = testPoller { latch.countDown() },
-            emitter = testEmitter { },
             committer = testCommitter { },
             instanceId = "test",
             log = log,
@@ -102,7 +101,7 @@ class ShutdownCoordinatorTest {
     }
 
     @Test
-    fun `shutdown stops poller emitter and committer before client`() {
+    fun `shutdown stops components before client`() {
         val order = mutableListOf<String>()
         val coordinator = ShutdownCoordinator(
             client = testClient(
@@ -111,7 +110,6 @@ class ShutdownCoordinatorTest {
             ),
             closeSignal = closeSignal(),
             poller = testPoller { order.add("poller") },
-            emitter = testEmitter { order.add("emitter") },
             committer = testCommitter { order.add("committer") },
             instanceId = "test",
             log = log,
@@ -120,7 +118,6 @@ class ShutdownCoordinatorTest {
         coordinator.shutdown()
 
         assertTrue(order.indexOf("poller") < order.indexOf("close"), "poller should stop before client")
-        assertTrue(order.indexOf("emitter") < order.indexOf("close"), "emitter should stop before client")
         assertTrue(order.indexOf("committer") < order.indexOf("close"), "committer should stop before client")
     }
 
@@ -137,7 +134,7 @@ class ShutdownCoordinatorTest {
     companion object {
         fun testPoller(onStop: () -> Unit = {}): Poller = object : Poller {
             private val stopped = AtomicBoolean(false)
-            override fun start(): Disposable = error("unexpected")
+            override fun start() = error("unexpected")
             override fun stop(): Mono<Void> = Mono.fromRunnable {
                 if (!stopped.getAndSet(true)) onStop()
             }
@@ -146,20 +143,12 @@ class ShutdownCoordinatorTest {
             override val isRunning: Boolean get() = !stopped.get()
         }
 
-        fun testEmitter(onStop: () -> Unit = {}): Emitter = object : Emitter {
-            private val stopped = AtomicBoolean(false)
-            override fun start(): Disposable = error("unexpected")
-            override fun stop(): Mono<Void> = Mono.fromRunnable {
-                if (!stopped.getAndSet(true)) onStop()
-            }
-        }
-
         fun testCommitter(onStop: () -> Unit = {}): Committer = object : Committer {
             override fun markProcessed(position: Position): Mono<Position> = error("unexpected")
             override fun seedOffsets(offsets: Offsets) = error("unexpected")
             override val positions: Flux<Position> get() = error("unexpected")
             override val processedOffsets: Offsets get() = error("unexpected")
-            override fun start(): Disposable = error("unexpected")
+            override fun start() = error("unexpected")
             override fun stop(): Mono<Void> = Mono.fromRunnable { onStop() }
         }
     }
