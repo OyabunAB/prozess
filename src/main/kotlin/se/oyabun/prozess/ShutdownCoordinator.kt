@@ -15,8 +15,8 @@ interface ShutdownableClient {
 }
 
 /**
- * Orchestrates a graceful shutdown sequence: signal close, stop pipelines in
- * parallel (poller + emitter), flush committer, then close the client.
+ * Orchestrates a graceful shutdown sequence: signal close, stop poller,
+ * flush committer, then close the client.
  *
  * Constructed once at shutdown time with the live component references — no
  * indirection, no state, disposable.
@@ -24,7 +24,6 @@ interface ShutdownableClient {
  * @param client       the underlying Kafka client.
  * @param closeSignal  emitted to terminate the message feed flux.
  * @param poller       the poller to stop.
- * @param emitter      the emitter to stop.
  * @param committer    the committer to flush.
  * @param instanceId   label for logging.
  * @param log          logger.
@@ -33,7 +32,6 @@ class ShutdownCoordinator(
     private val client: ShutdownableClient,
     private val closeSignal: Sinks.One<Unit>,
     private val poller: Poller,
-    private val emitter: Emitter,
     private val committer: Committer,
     private val instanceId: String,
     private val log: Logger,
@@ -43,7 +41,7 @@ class ShutdownCoordinator(
             client.wakeup()
             closeSignal.tryEmitEmpty()
         }.then(
-            `when`(poller.stop(), emitter.stop()).then(committer.stop())
+            poller.stop().then(committer.stop())
         ).then(defer { client.close() })
         try {
             if (duration != null) task.block(duration.toJavaDuration())

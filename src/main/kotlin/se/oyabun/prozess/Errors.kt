@@ -10,4 +10,3 @@ class CommitFailure(message: String) : RuntimeException(message)
 
 class CommitterAlreadyRunning(message: String) : RuntimeException(message)
 
-class EmitterAlreadyRunning(message: String) : RuntimeException(message)
