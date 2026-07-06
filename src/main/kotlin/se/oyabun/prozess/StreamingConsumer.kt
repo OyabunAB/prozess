@@ -1,15 +1,11 @@
 package se.oyabun.prozess
 
 import se.oyabun.prozess.Prozess.ConsumerFilter
-import se.oyabun.prozess.Prozess.ConsumerProcess
 import se.oyabun.prozess.StartOffset.AtTimestamp
 import se.oyabun.prozess.StartOffset.Earliest
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
-import reactor.core.publisher.Mono.delay
 import reactor.core.publisher.Mono.empty
-import reactor.core.publisher.Mono.error
-import reactor.core.publisher.Mono.fromCallable
 import reactor.core.publisher.Mono.just
 import reactor.core.publisher.Mono.never
 import reactor.core.publisher.Mono.zip
@@ -18,8 +14,6 @@ import reactor.util.concurrent.Queues
 import reactor.util.retry.Retry
 import se.oyabun.prozess.EndOffset.CatchUp
 import se.oyabun.prozess.Prozess
-import se.oyabun.prozess.Retrying.infiniteRetries
-import se.oyabun.prozess.Retrying.withRetries
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
@@ -29,11 +23,10 @@ import kotlin.time.Duration.Companion.seconds
 import kotlin.time.toJavaDuration
 
 @OptIn(ExperimentalAtomicApi::class)
-class StreamingConsumer<M>(
+class StreamingConsumer<M : Any>(
     val config: ConsumerConfig,
+    private val processor: Processor<M>,
     private val filter: ConsumerFilter = { true },
-    private val deserializer: Prozess.Deserializer<M>,
-    private val process: ConsumerProcess<M> = { _,_ -> },
     instance: String? = "consumer",
     private val client: KafkaClient = ThreadsafeKafkaClient(config),
 ) {
@@ -100,10 +93,11 @@ class StreamingConsumer<M>(
         incomingFeed(sync, closeSignal.asMono(), from, until)
             .groupBy { it.position.partition }
             .flatMap { partition ->
-                partition.concatMap { received ->
-                    if (filter(received)) processRetrying(received)
-                    else just(received.position)
-                }
+                partition.groupBy { filter(it) }
+                    .flatMap { grouped ->
+                        if (grouped.key()) processor.process(grouped)
+                        else grouped.map { it.position }
+                    }
             }
             .flatMap { position -> committer.markProcessed(position) }
             .subscribe()
@@ -217,19 +211,6 @@ class StreamingConsumer<M>(
         }
     }
 
-    private fun processRetrying(received: Received, attempt: Long = 0): Mono<Position> =
-        fromCallable { deserializer.invoke(received.message) }
-            .map { process(received, it); received.position }
-            .onErrorResume { e ->
-                if (isDisposed) error(e)
-                else {
-                    log.kafka.processingRetrying(instanceId, received.position.partition, attempt, e)
-                    delay(backoff(attempt))
-                        .thenReturn(received)
-                        .flatMap { processRetrying(it, attempt + 1) }
-                }
-            }
-
     private fun completionSignal(): Mono<Void> = committer.positions
         .map {
             partitionManager.assignments().all { partition ->
@@ -252,29 +233,4 @@ class StreamingConsumer<M>(
     fun lag(partition: Partition): Long =
         client.endOffsetOf(partition).zipWith(client.positionOf(partition)).map { it.t1 - it.t2 }.block()
             ?: throw ConsumerNotActive("$instanceId lag() failed for $partition")
-
-    companion object {
-        private fun backoff(attempt: Long): java.time.Duration =
-            minOf(30.seconds, 1.seconds * (1 shl attempt.toInt().coerceAtMost(30))).toJavaDuration()
-    }
 }
-
-private class SinkOverflowException : RuntimeException()
-
-private fun <T : Any> Sinks.Many<T>.safeEmit(value: T, id: Any): Mono<Void> =
-    Mono.defer { Mono.just(tryEmitNext(value)) }
-        .flatMap { result ->
-            when (result) {
-                Sinks.EmitResult.OK -> Mono.just(Unit)
-                Sinks.EmitResult.FAIL_TERMINATED, Sinks.EmitResult.FAIL_CANCELLED, Sinks.EmitResult.FAIL_ZERO_SUBSCRIBER -> Mono.just(Unit)
-                Sinks.EmitResult.FAIL_OVERFLOW -> Mono.error(SinkOverflowException())
-                else -> Mono.error(RuntimeException("Sink emission failed: $result"))
-            }
-        }
-        .withRetries(
-            id = id,
-            maxAttempts = infiniteRetries,
-            minBackoff = 10.milliseconds,
-            retryOn = { it is SinkOverflowException },
-        )
-        .then()

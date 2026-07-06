@@ -8,7 +8,7 @@ plugins {
     alias(libs.plugins.nexusPublish)
 }
 
-version = libs.versions.prozess.get()
+version = System.getenv("VERSION") ?: "0.0.0-SNAPSHOT"
 
 repositories {
     mavenCentral()
@@ -31,6 +31,7 @@ dependencies {
     testImplementation(libs.bundles.test)
 }
 
+val isRelease: Boolean = Regex("""^\d+\.\d+\.\d+$""").matches(version.toString())
 val ossrhUsername: String? = System.getenv("OSSRH_USERNAME")
 val ossrhPassword: String? = System.getenv("OSSRH_PASSWORD")
 val signingKey: String? = System.getenv("GPG_SIGNING_KEY")
@@ -41,18 +42,20 @@ kotlin {
     compilerOptions { optIn.add("kotlin.time.ExperimentalTime") }
 }
 
-if (signingKey != null) {
+if (isRelease && signingKey != null) {
     signing {
         useInMemoryPgpKeys(signingKey, signingPassword)
         sign(publishing.publications["maven"])
     }
 }
 
-nexusPublishing {
-    repositories {
-        sonatype {
-            username.set(ossrhUsername)
-            password.set(ossrhPassword)
+if (isRelease) {
+    nexusPublishing {
+        repositories {
+            sonatype {
+                username.set(ossrhUsername)
+                password.set(ossrhPassword)
+            }
         }
     }
 }

@@ -211,10 +211,14 @@ class FakeKafkaClientTest {
         val fake = FakeKafkaClient()
         fake.setPartitionsFor("test", setOf(p0))
 
+        val processor = DefaultProcessor.each<String>(
+            deserializer = { String(it) },
+            handler = {},
+        )
         val consumer = StreamingConsumer(
             config = ConsumerConfig("bootstrap", "group", "test"),
+            processor = processor,
             client = fake,
-            deserializer = { String(it) },
         )
 
         consumer.start(StartOffset.Latest, EndOffset.Continuous)
@@ -232,10 +236,14 @@ class FakeKafkaClientTest {
         fake.setPositionOfResult { 50L }
         fake.setEndOffsetOfResult { 100L }
 
+        val processor = DefaultProcessor.each<String>(
+            deserializer = { String(it) },
+            handler = {},
+        )
         val consumer = StreamingConsumer(
             config = ConsumerConfig("bootstrap", "group", "test"),
+            processor = processor,
             client = fake,
-            deserializer = { String(it) },
         )
 
         consumer.start(StartOffset.Latest, EndOffset.Continuous)
@@ -377,10 +385,14 @@ class FakeKafkaClientTest {
         val fake = FakeKafkaClient()
         fake.setPartitionsFor("test", setOf(p0))
 
+        val processor = DefaultProcessor.each<String>(
+            deserializer = { String(it) },
+            handler = {},
+        )
         val consumer = StreamingConsumer(
             config = ConsumerConfig("bootstrap", "group", "test"),
+            processor = processor,
             client = fake,
-            deserializer = { String(it) },
         )
 
         consumer.start(StartOffset.Latest, EndOffset.Continuous)

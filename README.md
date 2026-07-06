@@ -25,6 +25,54 @@ The poller runs on its own single-thread scheduler. The committer runs its commi
 
 Partition assignment filtering happens inline via `.filter { it.position.partition in partitionManager.assignments() }` on `buffer.asFlux()` — unassigned records are silently dropped before reaching the processing chain.
 
+### Processor
+
+The `Processor` abstraction (see [Processor.kt](src/main/kotlin/se/oyabun/prozess/Processor.kt)) encapsulates deserialization, handler invocation, and retry/backoff. The consumer builder API ([Prozess.kt](src/main/kotlin/se/oyabun/prozess/Prozess.kt)) constructs the processing pipeline:
+
+```kotlin
+// Per-message processing
+Prozess.consumer(config, deserializer)
+    .each { p -> handleMessage(p.received, p.value) }
+    .start()
+
+// Batched processing (atomic batches)
+Prozess.consumer(config, deserializer)
+    .batch(size = 10, duration = 1.seconds) { batch ->
+        handleBatch(batch.map { it.value })
+    }
+    .start()
+
+// Key-grouped processing (per-key ordering)
+Prozess.consumer(config, deserializer)
+    .groupBy { p -> p.value.userId }
+    .each { key, p -> handleUser(key, p.value) }
+    .start()
+
+// Key-grouped batches (per-key batching)
+Prozess.consumer(config, deserializer)
+    .groupBy { p -> p.value.userId }
+    .batch(size = 10) { key, batch ->
+        handleUserBatch(key, batch.map { it.value })
+    }
+    .start()
+```
+
+The retry policy is backoff-only — messages are retried indefinitely (never exhausted). Configure via `RetryConfig`:
+
+```kotlin
+Prozess.consumer(config, deserializer)
+    .each(
+        maxConcurrency = 4,
+        retryConfig = RetryConfig(
+            minBackoff = 500.milliseconds,
+            maxBackoff = 30.seconds,
+        ),
+    ) { p -> handle(p.value) }
+    .start()
+```
+
+Key-grouped processing uses a `ContiguousOffsetTracker` to prevent offset gaps when concurrent key groups complete out of order — positions are only emitted when a contiguous prefix is complete.
+
 ### ReceivedBuffer
 
 The `ReceivedBuffer` interface (see [Buffering.kt](src/main/kotlin/se/oyabun/prozess/Buffering.kt)) connects the poller to the processing chain:
