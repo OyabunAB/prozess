@@ -1,5 +1,5 @@
 [versions]
-prozess = "0.1.0"
+
 kotlin = "2.4.0"
 jvm = "21"
 reactor = "3.8.6"
