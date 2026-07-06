@@ -51,13 +51,13 @@ internal class ThreadsafeKafkaClient(config: ConsumerConfig) : KafkaClient {
         delegate.subscribe(topics, object : ConsumerRebalanceListener {
             override fun onPartitionsRevoked(partitions: MutableCollection<TopicPartition>) {
                 listener.onPartitionsRevoked(
-                    context = PollContext(this@ThreadsafeKafkaClient),
+                    context = PollContext(),
                     partitions = partitions.map { it.toPartition() }.toSet(),
                 )
             }
             override fun onPartitionsAssigned(partitions: MutableCollection<TopicPartition>) {
                 listener.onPartitionsAssigned(
-                    context = PollContext(this@ThreadsafeKafkaClient),
+                    context = PollContext(),
                     partitions = partitions.map { it.toPartition() }.toSet(),
                 )
             }
@@ -100,11 +100,15 @@ internal class ThreadsafeKafkaClient(config: ConsumerConfig) : KafkaClient {
         }
     }.then().subscribeOn(scheduler)
 
-    inner class PollContext(val delegate: KafkaClient) : RebalanceContext {
-        override fun position(partition: Partition): Long = delegate.positionOf(partition).require()
-        override fun pause(partitions: Partitions) = delegate.pause(partitions).execute()
-        override fun commit(offsets: Offsets) = delegate.commit(offsets).execute()
-        override fun seek(targets: Offsets) = delegate.seek(targets).execute()
+    inner class PollContext : RebalanceContext {
+        override fun position(partition: Partition): Long = delegate.position(partition.toApache())
+
+        override fun pause(partitions: Partitions) = delegate.pause(partitions.map { it.toApache() })
+
+        override fun commit(offsets: Offsets) = delegate.commitSync(offsets.mapKeys { it.key.toApache() }.mapValues { OffsetAndMetadata(it.value, "") })
+
+        override fun seek(targets: Offsets) = targets.forEach { (partition, offset) -> delegate.seek(partition.toApache(), offset) }
+
     }
 
     override fun pause(partitions: Partitions): Mono<Partitions> =
@@ -149,8 +153,4 @@ internal class ThreadsafeKafkaClient(config: ConsumerConfig) : KafkaClient {
         Position(Partition(key.partition(), Topic(key.topic())), value)
 
     fun <T : Any> Flux<T>.collectSet(): Mono<Set<T>> = collectList().map { it.toSet() }
-
-    fun <X : Any> Mono<X>.require() : X = blockOptional().orElseThrow()
-
-    fun <X : Any> Mono<X>.execute() : Unit = blockOptional().orElseThrow().let {}
 }

@@ -13,7 +13,6 @@ import reactor.core.publisher.Sinks
 import reactor.util.concurrent.Queues
 import reactor.util.retry.Retry
 import se.oyabun.prozess.EndOffset.CatchUp
-import se.oyabun.prozess.Prozess
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
@@ -168,17 +167,7 @@ class StreamingConsumer<M : Any>(
     private fun initOffsets(topicPartitions: Partitions, from: StartOffset, until: EndOffset): Mono<Positions> {
         val loadEndings = if (until is CatchUp) client.endOffsets(topicPartitions).map { it.also { ends.store(it) } } else just(emptySet())
         val loadBeginnings = when (from) {
-            is Earliest -> zip(
-                    client.beginningOffsets(topicPartitions).map { it.asOffsets() },
-                    client.committed(topicPartitions),
-                ) { beginnings, committed ->
-                    val targets = beginnings.filterKeys { p ->
-                        val known = committed[p]
-                        known == null || known <= 0L
-                    }
-                    if (targets.isNotEmpty()) pendingSeeks.store(targets)
-                    emptySet()
-                }
+            is Earliest -> just(emptySet())
             is StartOffset.Latest -> just(emptySet())
             is AtTimestamp -> client.offsetsForTimes(topicPartitions, from.instant)
                 .flatMap { positions: Positions ->
