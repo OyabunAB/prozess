@@ -125,9 +125,9 @@ internal class ThreadsafeKafkaClient(config: ConsumerConfig) : KafkaClient {
 
     override fun committed(partitions: Partitions): Mono<Offsets> = fromCallable {
         delegate.committed(partitions.map { it.toApache() }.toSet())
-            .filterValues { it != null }
-            .mapKeys { it.key.toPartition() }
-            .mapValues { it.value!!.offset() }
+            .entries
+            .mapNotNull { (key, value) -> value?.let { key.toPartition() to it.offset() } }
+            .toMap()
     }.subscribeOn(scheduler)
 
     override fun wakeup() = delegate.wakeup()
