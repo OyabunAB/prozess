@@ -3,6 +3,7 @@ package se.oyabun.prozess
 import se.oyabun.prozess.Prozess.ConsumerFilter
 import se.oyabun.prozess.StartOffset.AtTimestamp
 import se.oyabun.prozess.StartOffset.Earliest
+import se.oyabun.prozess.StartOffset.Latest
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 import reactor.core.publisher.Mono.empty
@@ -13,7 +14,6 @@ import reactor.core.publisher.Sinks
 import reactor.util.concurrent.Queues
 import reactor.util.retry.Retry
 import se.oyabun.prozess.EndOffset.CatchUp
-import se.oyabun.prozess.Prozess
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
@@ -82,7 +82,7 @@ class StreamingConsumer<M : Any>(
     )
 
     fun start(
-        from: StartOffset = StartOffset.Latest,
+        from: StartOffset = config.startOffset,
         until: EndOffset = EndOffset.Continuous,
     ) {
         check(started.compareAndSet(false, true)) { "$instanceId start() called more than once" }
@@ -168,18 +168,18 @@ class StreamingConsumer<M : Any>(
     private fun initOffsets(topicPartitions: Partitions, from: StartOffset, until: EndOffset): Mono<Positions> {
         val loadEndings = if (until is CatchUp) client.endOffsets(topicPartitions).map { it.also { ends.store(it) } } else just(emptySet())
         val loadBeginnings = when (from) {
-            is Earliest -> zip(
-                    client.beginningOffsets(topicPartitions).map { it.asOffsets() },
-                    client.committed(topicPartitions),
-                ) { beginnings, committed ->
-                    val targets = beginnings.filterKeys { p ->
-                        val known = committed[p]
-                        known == null || known <= 0L
-                    }
-                    if (targets.isNotEmpty()) pendingSeeks.store(targets)
-                    emptySet()
+            is Earliest -> client.committed(topicPartitions)
+                .flatMap { committed ->
+                    val unseeded = topicPartitions.filter { it !in committed }.toSet()
+                    if (unseeded.isEmpty()) just(emptySet())
+                    else client.beginningOffsets(unseeded)
+                        .map { beginnings ->
+                            val targets = beginnings.asOffsets()
+                            if (targets.isNotEmpty()) pendingSeeks.store(targets)
+                            beginnings
+                        }
                 }
-            is StartOffset.Latest -> just(emptySet())
+            is Latest -> just(emptySet())
             is AtTimestamp -> client.offsetsForTimes(topicPartitions, from.instant)
                 .flatMap { positions: Positions ->
                     if (positions.isEmpty()) client.endOffsets(topicPartitions)

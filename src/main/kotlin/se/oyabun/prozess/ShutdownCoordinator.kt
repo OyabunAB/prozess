@@ -43,11 +43,11 @@ class ShutdownCoordinator(
             .then(defer { client.close() })
         try {
             if (timeout != null) task.block(timeout.toJavaDuration())
-            else task.block()
+            else task.block(10.seconds.toJavaDuration())
         } catch (e: Exception) {
             log.kafka.terminatedUnexpectedly(instanceId, e)
             client.wakeup()
-            try { client.close().block() } catch (_: Exception) { }
+            try { client.close().block(3.seconds.toJavaDuration()) } catch (_: Exception) { }
         }
     }
 }

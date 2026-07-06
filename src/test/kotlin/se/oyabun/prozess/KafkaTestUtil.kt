@@ -54,3 +54,24 @@ fun publish(bootstrapServers: String, topic: String, count: Int): List<String> {
     publishAt(bootstrapServers, topic, messages)
     return messages
 }
+
+fun publishToPartition(bootstrapServers: String, topic: String, partition: Int, count: Int): List<String> {
+    val messages = (1..count).map { UUID.randomUUID().toString() }
+    KafkaProducer<String, ByteArray>(
+        mapOf(
+            ApacheProducerConfig.BOOTSTRAP_SERVERS_CONFIG to bootstrapServers,
+            ApacheProducerConfig.KEY_SERIALIZER_CLASS_CONFIG to StringSerializer::class.java.name,
+            ApacheProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG to ByteArraySerializer::class.java.name,
+        ),
+    ).use { producer ->
+        messages.forEach { msg ->
+            producer.send(ProducerRecord(topic, partition, msg, msg.toByteArray())).get()
+        }
+    }
+    return messages
+}
+
+fun addPartitions(bootstrapServers: String, topic: String, totalPartitions: Int) {
+    AdminClient.create(mapOf(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG to bootstrapServers))
+        .use { it.createPartitions(mapOf(topic to org.apache.kafka.clients.admin.NewPartitions.increaseTo(totalPartitions))).all().get() }
+}
