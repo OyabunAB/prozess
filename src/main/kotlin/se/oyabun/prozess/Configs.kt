@@ -49,6 +49,7 @@ data class ConsumerConfig(
     val bootstrapServers: String,
     val groupId: String,
     val topics: Topics,
+    val startOffset: StartOffset = StartOffset.Latest,
     val pollInterval: Duration = 100.milliseconds,
     val sessionTimeout: Duration = 45.seconds,
     val heartbeatInterval: Duration = 3.seconds,
@@ -75,6 +76,7 @@ data class ConsumerConfig(
 internal fun ConsumerConfig.toKafkaProperties(): Map<String, Any> = mapOf(
     ApacheConsumerConfig.BOOTSTRAP_SERVERS_CONFIG to bootstrapServers,
     ApacheConsumerConfig.GROUP_ID_CONFIG to groupId,
+    ApacheConsumerConfig.AUTO_OFFSET_RESET_CONFIG to startOffset.autoOffsetReset(),
     ApacheConsumerConfig.SESSION_TIMEOUT_MS_CONFIG to sessionTimeout.inWholeMilliseconds.toInt(),
     ApacheConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG to heartbeatInterval.inWholeMilliseconds.toInt(),
     ApacheConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG to maxPollInterval.inWholeMilliseconds.toInt(),
@@ -85,3 +87,9 @@ internal fun ConsumerConfig.toKafkaProperties(): Map<String, Any> = mapOf(
     ApacheConsumerConfig.MAX_PARTITION_FETCH_BYTES_CONFIG to maxPartitionFetchBytes,
     ApacheConsumerConfig.ISOLATION_LEVEL_CONFIG to isolationLevel.value,
 )
+
+private fun StartOffset.autoOffsetReset(): String = when (this) {
+    is StartOffset.Earliest -> "earliest"
+    is StartOffset.Latest -> "latest"
+    is StartOffset.AtTimestamp -> "none"
+}

@@ -25,7 +25,6 @@ internal class ThreadsafeKafkaClient(config: ConsumerConfig) : KafkaClient {
         mapOf(
             ApacheConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG to StringDeserializer::class.java.name,
             ApacheConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG to ByteArrayDeserializer::class.java.name,
-            ApacheConsumerConfig.AUTO_OFFSET_RESET_CONFIG to "earliest",
             ApacheConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG to false,
         ) + config.toKafkaProperties(),
     )
@@ -68,7 +67,7 @@ internal class ThreadsafeKafkaClient(config: ConsumerConfig) : KafkaClient {
     override fun offsetsForTimes(partitions: Partitions, timestamp: Instant): Mono<Positions> =
         fromCallable {
             delegate.offsetsForTimes(
-                partitions.associate { it.toApache() to timestamp.epochSeconds }
+                partitions.associate { it.toApache() to timestamp.toEpochMilliseconds() }
             )
         }.map { result ->
             result.mapNotNull { (tp, oat) ->
@@ -126,8 +125,9 @@ internal class ThreadsafeKafkaClient(config: ConsumerConfig) : KafkaClient {
 
     override fun committed(partitions: Partitions): Mono<Offsets> = fromCallable {
         delegate.committed(partitions.map { it.toApache() }.toSet())
+            .filterValues { it != null }
             .mapKeys { it.key.toPartition() }
-            .mapValues { it.value?.offset() ?: 0L }
+            .mapValues { it.value!!.offset() }
     }.subscribeOn(scheduler)
 
     override fun wakeup() = delegate.wakeup()
