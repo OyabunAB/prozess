@@ -1,7 +1,6 @@
 package se.oyabun.prozess
 
 import org.junit.jupiter.api.Test
-import reactor.core.Disposable
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 import se.oyabun.prozess.Logging
@@ -16,7 +15,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.test.assertEquals
-import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlin.test.fail
 
@@ -33,7 +31,7 @@ class PartitionManagerTest {
     fun `onPartitionsRevoked commits processed offsets via context and removes from assignments`() {
         val committed = mutableListOf<Offsets>()
         val committer = BufferedCommitter(
-            commit = Committer.Commit { Mono.just(it) },
+            client = FakeKafkaClient(),
             assignments = { setOf(p0, p1) },
             instanceId = "test",
             log = log,
@@ -56,7 +54,7 @@ class PartitionManagerTest {
     fun `onPartitionsRevoked with multiple revoked partitions commits each`() {
         val committed = mutableListOf<Offsets>()
         val committer = BufferedCommitter(
-            commit = Committer.Commit { Mono.just(it) },
+            client = FakeKafkaClient(),
             assignments = { setOf(p0, p1, p2) },
             instanceId = "test",
             log = log,
@@ -147,7 +145,7 @@ class PartitionManagerTest {
     fun `onPartitionsRevoked does not commit when no offsets for revoked partitions`() {
         val committed = mutableListOf<Offsets>()
         val committer = BufferedCommitter(
-            commit = Committer.Commit { Mono.just(it) },
+            client = FakeKafkaClient(),
             assignments = { setOf(p0, p1) },
             instanceId = "test",
             log = log,
@@ -167,7 +165,7 @@ class PartitionManagerTest {
     fun `onPartitionsRevoked with partial overlap commits only matching offsets`() {
         val committed = mutableListOf<Offsets>()
         val committer = BufferedCommitter(
-            commit = Committer.Commit { Mono.just(it) },
+            client = FakeKafkaClient(),
             assignments = { setOf(p0, p1, p2) },
             instanceId = "test",
             log = log,
@@ -237,7 +235,7 @@ class PartitionManagerTest {
     fun `processing then revoke commits processed offsets via context`() {
         val committed = mutableListOf<Offsets>()
         val committer = BufferedCommitter(
-            commit = Committer.Commit { Mono.just(it) },
+            client = FakeKafkaClient(),
             assignments = { setOf(p0, p1) },
             instanceId = "test-concurrent",
             log = log,
@@ -266,7 +264,7 @@ class PartitionManagerTest {
     fun `concurrent processing with full revoke commits all offsets via context`() {
         val committed = mutableListOf<Offsets>()
         val committer = BufferedCommitter(
-            commit = Committer.Commit { Mono.just(it) },
+            client = FakeKafkaClient(),
             assignments = { setOf(p0, p1, p2) },
             instanceId = "test-concurrent-full",
             log = log,

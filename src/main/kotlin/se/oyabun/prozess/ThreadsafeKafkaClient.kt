@@ -1,15 +1,5 @@
 package se.oyabun.prozess
 
-import se.oyabun.prozess.ConsumerConfig
-import se.oyabun.prozess.Offsets
-import se.oyabun.prozess.Partition
-import se.oyabun.prozess.Partitions
-import se.oyabun.prozess.Position
-import se.oyabun.prozess.Positions
-import se.oyabun.prozess.Received
-import se.oyabun.prozess.Topic
-import se.oyabun.prozess.Topics
-import se.oyabun.prozess.toKafkaProperties
 import org.apache.kafka.clients.consumer.ConsumerConfig as ApacheConsumerConfig
 import org.apache.kafka.clients.consumer.ConsumerRebalanceListener
 import org.apache.kafka.clients.consumer.ConsumerRecord
@@ -24,14 +14,13 @@ import reactor.core.publisher.Flux.fromIterable
 import reactor.core.publisher.Mono
 import reactor.core.publisher.Mono.fromCallable
 import reactor.core.scheduler.Schedulers
-import se.oyabun.prozess.RebalanceContext
 import org.apache.kafka.common.errors.WakeupException
-import java.time.Instant
 import kotlin.time.Duration
-import kotlin.time.Duration.Companion.milliseconds
-import kotlin.time.Duration.Companion.seconds
+import kotlin.time.Instant
 import kotlin.time.toJavaDuration
-internal class ThreadsafeKafkaClient(config: ConsumerConfig) : ShutdownableClient {
+
+internal class ThreadsafeKafkaClient(config: ConsumerConfig) : KafkaClient {
+    override val pollInterval: Duration = config.pollInterval
     private val delegate = KafkaConsumer<String, ByteArray>(
         mapOf(
             ApacheConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG to StringDeserializer::class.java.name,
@@ -42,33 +31,44 @@ internal class ThreadsafeKafkaClient(config: ConsumerConfig) : ShutdownableClien
     )
     private val scheduler = Schedulers.newSingle("single-thread-kafka-client-" + delegate.hashCode())
 
-    fun partitionsFor(topics: Topics): Mono<Partitions> = fromIterable(topics)
+    override fun partitionsFor(topics: Topics): Mono<Partitions> = fromIterable(topics)
         .flatMapIterable { delegate.partitionsFor(it) }
         .map { it.toPartition() }.collectSet().subscribeOn(scheduler)
 
-    fun beginningOffsets(partitions: Partitions): Mono<Positions> = fromIterable(partitions)
+    override fun beginningOffsets(partitions: Partitions): Mono<Positions> = fromIterable(partitions)
         .map { it.toApache() }.collectList().map { delegate.beginningOffsets(it) }
         .map { result -> result.map { it.toPosition() }.toSet() }.subscribeOn(scheduler)
 
-    fun endOffsets(partitions: Partitions): Mono<Positions> = fromIterable(partitions)
+    override fun endOffsets(partitions: Partitions): Mono<Positions> = fromIterable(partitions)
         .map { it.toApache() }.collectList().map { delegate.endOffsets(it) }
         .flatMapIterable { result -> result.mapNotNull { if (it.value > 0) it.toPosition() else null } }
         .collectSet().subscribeOn(scheduler)
 
-    fun rebalanceContext(): RebalanceContext = PollContext(delegate)
-
-    fun subscribe(
+    override fun subscribe(
         topics: Topics,
-        listener: ConsumerRebalanceListener,
+        listener: RebalanceListener,
     ): Mono<Topics> = fromCallable {
-        delegate.subscribe(topics, listener)
+        delegate.subscribe(topics, object : ConsumerRebalanceListener {
+            override fun onPartitionsRevoked(partitions: MutableCollection<TopicPartition>) {
+                listener.onPartitionsRevoked(
+                    context = PollContext(this@ThreadsafeKafkaClient),
+                    partitions = partitions.map { it.toPartition() }.toSet(),
+                )
+            }
+            override fun onPartitionsAssigned(partitions: MutableCollection<TopicPartition>) {
+                listener.onPartitionsAssigned(
+                    context = PollContext(this@ThreadsafeKafkaClient),
+                    partitions = partitions.map { it.toPartition() }.toSet(),
+                )
+            }
+        })
         topics
     }.subscribeOn(scheduler)
 
-    fun offsetsForTimes(partitions: Partitions, timestamp: Instant): Mono<Positions> =
+    override fun offsetsForTimes(partitions: Partitions, timestamp: Instant): Mono<Positions> =
         fromCallable {
             delegate.offsetsForTimes(
-                partitions.associate { it.toApache() to timestamp.toEpochMilli() }
+                partitions.associate { it.toApache() to timestamp.epochSeconds }
             )
         }.map { result ->
             result.mapNotNull { (tp, oat) ->
@@ -76,15 +76,15 @@ internal class ThreadsafeKafkaClient(config: ConsumerConfig) : ShutdownableClien
             }.toSet()
         }.subscribeOn(scheduler)
 
-    fun positionOf(partition: Partition): Mono<Long> =
+    override fun positionOf(partition: Partition): Mono<Long> =
         fromCallable { delegate.position(partition.toApache()) }
             .subscribeOn(scheduler)
 
-    fun endOffsetOf(partition: Partition): Mono<Long> = Flux.just(partition.toApache())
+    override fun endOffsetOf(partition: Partition): Mono<Long> = Flux.just(partition.toApache())
         .collectList().map { delegate.endOffsets(it)[partition.toApache()]!! }
         .subscribeOn(scheduler)
 
-    fun poll(timeout: Duration = 100.milliseconds): Mono<List<Received>> =
+    override fun poll(timeout: Duration): Mono<List<Received>> =
         fromCallable {
             try {
                 delegate.poll(timeout.toJavaDuration())
@@ -94,52 +94,46 @@ internal class ThreadsafeKafkaClient(config: ConsumerConfig) : ShutdownableClien
             }
         }.subscribeOn(scheduler)
 
-    inner class PollContext(val delegate: KafkaConsumer<*,*>) : RebalanceContext {
-        override fun position(partition: Partition): Long = delegate.position(partition.toApache())
-        override fun pause(partitions: Partitions) = delegate.pause(partitions.map { it.toApache() })
-        fun resume(partitions: Partitions) = delegate.resume(partitions.map { it.toApache() })
-        override fun commit(offsets: Offsets) = offsets.mapKeys { it.key.toApache() }
-            .mapValues { OffsetAndMetadata(it.value, "") }
-            .let { delegate.commitSync(it) }
-        override fun seek(targets: Offsets) = targets.forEach { (partition, target) ->
+    override fun seek(offsets: Offsets) = fromCallable {
+        offsets.forEach { (partition, target) ->
             delegate.seek(partition.toApache(), target)
         }
-        fun toPartitions(partitions: Collection<TopicPartition>): Partitions =
-            partitions.map { it.toPartition() }.toSet()
+    }.then().subscribeOn(scheduler)
+
+    inner class PollContext(val delegate: KafkaClient) : RebalanceContext {
+        override fun position(partition: Partition): Long = delegate.positionOf(partition).require()
+        override fun pause(partitions: Partitions) = delegate.pause(partitions).execute()
+        override fun commit(offsets: Offsets) = delegate.commit(offsets).execute()
+        override fun seek(targets: Offsets) = delegate.seek(targets).execute()
     }
 
-    fun pause(partitions: Partitions): Mono<Partitions> =
+    override fun pause(partitions: Partitions): Mono<Partitions> =
         fromCallable { delegate.pause(partitions.map { it.toApache() }); partitions }
             .subscribeOn(scheduler)
 
-    fun resume(partitions: Partitions): Mono<Partitions> =
+    override fun resume(partitions: Partitions): Mono<Partitions> =
         fromCallable { delegate.resume(partitions.map { it.toApache() }); partitions }
             .subscribeOn(scheduler)
 
-    fun commit(offsets: Offsets, metadata: String): Mono<Offsets> = fromCallable {
-        val apache = offsets.mapKeys { it.key.toApache() }
-            .mapValues { org.apache.kafka.clients.consumer.OffsetAndMetadata(it.value, metadata) }
+    override fun commit(offsets: Offsets, metadata: String): Mono<Offsets> = fromCallable {
+        val apache = offsets.mapKeys { it.key.toApache() }.mapValues { OffsetAndMetadata(it.value, metadata) }
         delegate.commitSync(apache)
-        offsets
-    }.subscribeOn(scheduler)
+    }.thenReturn(offsets).subscribeOn(scheduler)
 
-    fun committed(partitions: Partitions): Mono<Offsets> =
-        fromCallable {
-            delegate.committed(partitions.map { it.toApache() }.toSet())
-                .mapKeys { it.key.toPartition() }
-                .mapValues { it.value?.offset() ?: 0L }
-        }.subscribeOn(scheduler)
+    override fun committed(partitions: Partitions): Mono<Offsets> = fromCallable {
+        delegate.committed(partitions.map { it.toApache() }.toSet())
+            .mapKeys { it.key.toPartition() }
+            .mapValues { it.value?.offset() ?: 0L }
+    }.subscribeOn(scheduler)
 
     override fun wakeup() = delegate.wakeup()
 
-    override fun close(): Mono<Void> = fromCallable {
-        delegate.close(3.seconds.toJavaDuration())
+    override fun close(timeout: Duration): Mono<Void> = fromCallable {
+        delegate.close(timeout.toJavaDuration())
         scheduler.dispose()
-    }.then()
-        .subscribeOn(scheduler)
+    }.then().subscribeOn(scheduler)
 
-    private fun Partition.toApache() = org.apache.kafka.common.TopicPartition(topic.name, id)
-
+    private fun Partition.toApache() = TopicPartition(topic.name, id)
 
     private fun TopicPartition.toPartition() = Partition(partition(), Topic(topic()))
 
@@ -155,4 +149,8 @@ internal class ThreadsafeKafkaClient(config: ConsumerConfig) : ShutdownableClien
         Position(Partition(key.partition(), Topic(key.topic())), value)
 
     fun <T : Any> Flux<T>.collectSet(): Mono<Set<T>> = collectList().map { it.toSet() }
+
+    fun <X : Any> Mono<X>.require() : X = blockOptional().orElseThrow()
+
+    fun <X : Any> Mono<X>.execute() : Unit = blockOptional().orElseThrow().let {}
 }
