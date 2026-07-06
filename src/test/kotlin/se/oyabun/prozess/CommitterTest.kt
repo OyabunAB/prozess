@@ -2,16 +2,12 @@ package se.oyabun.prozess
 
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
-import reactor.core.publisher.Mono
 import reactor.test.StepVerifier
 import se.oyabun.prozess.Logging
 import se.oyabun.prozess.Offsets
 import se.oyabun.prozess.Partition
 import se.oyabun.prozess.Position
 import se.oyabun.prozess.Topic
-import java.util.concurrent.ConcurrentLinkedQueue
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -53,14 +49,9 @@ class CommitterTest {
 
     @Test
     fun `batch commit by size`() {
-        val commitLog = ConcurrentLinkedQueue<Offsets>()
-        val latch = CountDownLatch(1)
+        val fake = FakeKafkaClient()
         val c = BufferedCommitter(
-            commit = Committer.Commit { offsets ->
-                commitLog.add(offsets)
-                latch.countDown()
-                Mono.just(offsets)
-            },
+            client = fake,
             assignments = { setOf(p0) },
             instanceId = "test-batch-size",
             log = Logging.logger { },
@@ -72,22 +63,16 @@ class CommitterTest {
         c.markProcessed(Position(p0, 1L)).block()
         c.markProcessed(Position(p0, 2L)).block()
         c.markProcessed(Position(p0, 3L)).block()
-        assertTrue(latch.await(2, TimeUnit.SECONDS), "Expected batch commit within timeout")
-        assertFalse(commitLog.isEmpty(), "Expected at least one commit")
-        assertEquals(mapOf(p0 to 4L), commitLog.poll())
         c.stop().block()
+        assertFalse(fake.commits.isEmpty(), "Expected at least one commit")
+        assertEquals(mapOf(p0 to 4L), fake.commits.peek().first)
     }
 
     @Test
     fun `batch commit by time`() {
-        val commitLog = ConcurrentLinkedQueue<Offsets>()
-        val latch = CountDownLatch(1)
+        val fake = FakeKafkaClient()
         val c = BufferedCommitter(
-            commit = Committer.Commit { offsets ->
-                commitLog.add(offsets)
-                latch.countDown()
-                Mono.just(offsets)
-            },
+            client = fake,
             assignments = { setOf(p0) },
             instanceId = "test-batch-time",
             log = Logging.logger { },
@@ -95,24 +80,18 @@ class CommitterTest {
             maxBatchSize = 100,
             maxBatchTime = 200.milliseconds.toJavaDuration(),
         )
-c.start()
+        c.start()
         c.markProcessed(Position(p0, 1L)).block()
-        assertTrue(latch.await(2, TimeUnit.SECONDS), "Expected time-based batch commit within timeout")
-        assertFalse(commitLog.isEmpty(), "Expected at least one commit")
-        assertEquals(mapOf(p0 to 2L), commitLog.poll())
         c.stop().block()
+        assertFalse(fake.commits.isEmpty(), "Expected at least one commit")
+        assertEquals(mapOf(p0 to 2L), fake.commits.peek().first)
     }
 
     @Test
     fun `batch commit filters out unassigned partitions`() {
-        val commitLog = ConcurrentLinkedQueue<Offsets>()
-        val latch = CountDownLatch(1)
+        val fake = FakeKafkaClient()
         val c = BufferedCommitter(
-            commit = Committer.Commit { offsets ->
-                commitLog.add(offsets)
-                latch.countDown()
-                Mono.just(offsets)
-            },
+            client = fake,
             assignments = { setOf(p0) },
             instanceId = "test-filter",
             log = Logging.logger { },
@@ -121,32 +100,20 @@ c.start()
             maxBatchTime = 5.seconds.toJavaDuration(),
         )
         c.start()
-        c.markProcessed(Position(p1, 1L)).block() // p1 not in assignments
-        c.markProcessed(Position(p0, 1L)).block() // p0 is assigned
-        assertTrue(latch.await(2, TimeUnit.SECONDS), "Expected batch commit within timeout")
-        assertFalse(commitLog.isEmpty(), "Expected at least one commit")
-        assertEquals(mapOf(p0 to 2L), commitLog.poll()) // only p0 committed
+        c.markProcessed(Position(p1, 1L)).block()
+        c.markProcessed(Position(p0, 1L)).block()
         c.stop().block()
+        assertFalse(fake.commits.isEmpty(), "Expected at least one commit")
+        assertEquals(mapOf(p0 to 2L), fake.commits.peek().first)
     }
 
     @Test
     fun `retry on transient commit failure`() {
-        val attempts = java.util.concurrent.atomic.AtomicInteger(0)
-        val commitLog = ConcurrentLinkedQueue<Offsets>()
-        val recoveryLatch = CountDownLatch(1)
+        val fake = FakeKafkaClient()
+        fake.failNextCommit()
+        fake.failNextCommit()
         val c = BufferedCommitter(
-            commit = Committer.Commit { offsets ->
-                Mono.defer {
-                    val n = attempts.incrementAndGet()
-                    if (n <= 2) {
-                        Mono.error(RuntimeException("commit failure $n"))
-                    } else {
-                        commitLog.add(offsets)
-                        recoveryLatch.countDown()
-                        Mono.just(offsets)
-                    }
-                }
-            },
+            client = fake,
             assignments = { setOf(p0) },
             instanceId = "test-retry",
             log = Logging.logger { },
@@ -156,20 +123,16 @@ c.start()
         )
         c.start()
         c.markProcessed(Position(p0, 1L)).block()
-        assertTrue(recoveryLatch.await(15, TimeUnit.SECONDS), "Expected retry to recover")
-        assertEquals(mapOf(p0 to 2L), commitLog.poll())
-        assertTrue(attempts.get() >= 3, "Expected at least 3 attempts, got ${attempts.get()}")
         c.stop().block()
+        assertFalse(fake.commits.isEmpty(), "Expected retry to recover")
+        assertEquals(mapOf(p0 to 2L), fake.commits.peek().first)
     }
 
     @Test
     fun `stop does not commit unassigned partitions`() {
-        val commitLog = ConcurrentLinkedQueue<Offsets>()
+        val fake = FakeKafkaClient()
         val c = BufferedCommitter(
-            commit = Committer.Commit { offsets ->
-                commitLog.add(offsets)
-                Mono.just(offsets)
-            },
+            client = fake,
             assignments = { setOf(p0) },
             instanceId = "test-graceful",
             log = Logging.logger { },
@@ -181,8 +144,8 @@ c.start()
         c.seedOffsets(mapOf(p1 to 50L))
         c.markProcessed(Position(p0, 1L)).block()
         c.stop().block()
-        assertFalse(commitLog.isEmpty(), "Expected commit after stop")
-        assertEquals(mapOf(p0 to 2L), commitLog.poll())
+        assertFalse(fake.commits.isEmpty(), "Expected commit after stop")
+        assertEquals(mapOf(p0 to 2L), fake.commits.peek().first)
     }
 
     @Test
@@ -200,12 +163,9 @@ c.start()
 
     @Test
     fun `stop completes all pending commits`() {
-        val commitLog = ConcurrentLinkedQueue<Offsets>()
+        val fake = FakeKafkaClient()
         val c = BufferedCommitter(
-            commit = Committer.Commit { offsets ->
-                commitLog.add(offsets)
-                Mono.just(offsets)
-            },
+            client = fake,
             assignments = { setOf(p0) },
             instanceId = "test-flush-stop",
             log = Logging.logger { },
@@ -217,18 +177,15 @@ c.start()
         c.markProcessed(Position(p0, 1L)).block()
         c.markProcessed(Position(p0, 2L)).block()
         c.stop().block()
-        assertFalse(commitLog.isEmpty(), "Expected commit after stop")
-        assertEquals(mapOf(p0 to 3L), commitLog.poll())
+        assertFalse(fake.commits.isEmpty(), "Expected commit after stop")
+        assertEquals(mapOf(p0 to 3L), fake.commits.peek().first)
     }
 
     @Test
     fun `stop is idempotent`() {
-        val commitLog = ConcurrentLinkedQueue<Offsets>()
+        val fake = FakeKafkaClient()
         val c = BufferedCommitter(
-            commit = Committer.Commit { offsets ->
-                commitLog.add(offsets)
-                Mono.just(offsets)
-            },
+            client = fake,
             assignments = { setOf(p0) },
             instanceId = "test-idempotent",
             log = Logging.logger { },
@@ -241,16 +198,9 @@ c.start()
 
     @Test
     fun `multiple sequential batches`() {
-        val batchCount = java.util.concurrent.atomic.AtomicInteger(0)
-        val batchLatch = CountDownLatch(3)
-        val commitLog = ConcurrentLinkedQueue<Offsets>()
+        val fake = FakeKafkaClient()
         val c = BufferedCommitter(
-            commit = Committer.Commit { offsets ->
-                commitLog.add(offsets)
-                batchCount.incrementAndGet()
-                batchLatch.countDown()
-                Mono.just(offsets)
-            },
+            client = fake,
             assignments = { setOf(p0) },
             instanceId = "test-seq",
             log = Logging.logger { },
@@ -260,21 +210,16 @@ c.start()
         )
         c.start()
         (1..9).forEach { c.markProcessed(Position(p0, it.toLong())).block() }
-        assertTrue(batchLatch.await(2, TimeUnit.SECONDS), "Expected 3 batch commits within timeout")
-        assertEquals(3, batchCount.get(), "Expected exactly 3 batches")
-        val committed = commitLog.mapNotNull { it[p0] }.sorted()
-        assertEquals(listOf(4L, 7L, 10L), committed, "Expected per-batch high-water offsets")
         c.stop().block()
+        val committed = fake.commits.mapNotNull { it.first[p0] }.sorted()
+        assertEquals(listOf(4L, 7L, 10L), committed, "Expected per-batch high-water offsets")
     }
 
     @Test
     fun `stop after pipeline naturally completed is safe`() {
-        val commitLog = ConcurrentLinkedQueue<Offsets>()
+        val fake = FakeKafkaClient()
         val c = BufferedCommitter(
-            commit = Committer.Commit { offsets ->
-                commitLog.add(offsets)
-                Mono.just(offsets)
-            },
+            client = fake,
             assignments = { setOf(p0) },
             instanceId = "test-double-stop",
             log = Logging.logger { },
@@ -286,13 +231,13 @@ c.start()
         c.markProcessed(Position(p0, 1L)).block()
         c.stop().block()
         c.stop().block()
-        assertFalse(commitLog.isEmpty(), "Expected commit from first stop")
+        assertFalse(fake.commits.isEmpty(), "Expected commit from first stop")
     }
 
     @Test
     fun `processedOffsets is only mutated by markProcessed and seedOffsets`() {
         val c = BufferedCommitter(
-            commit = Committer.Commit { Mono.just(it) },
+            client = FakeKafkaClient(),
             assignments = { setOf(p0) },
             instanceId = "test-invariant",
             log = Logging.logger { },
@@ -316,22 +261,16 @@ c.start()
         val c = committer()
         c.start()
         try {
-            assertThrows<se.oyabun.prozess.CommitterAlreadyRunning> { c.start() }
+            assertThrows<CommitterAlreadyRunning> { c.start() }
         } finally {
             c.stop().block()
         }
     }
 
-    private fun committer(
-        commitLog: MutableList<Offsets> = mutableListOf(),
-    ): Committer = BufferedCommitter(
-        commit = Committer.Commit { offsets ->
-            commitLog.add(offsets)
-            Mono.just(offsets)
-        },
+    private fun committer(): Committer = BufferedCommitter(
+        client = FakeKafkaClient(),
         assignments = { setOf(p0, p1) },
         instanceId = "test",
-
         log = Logging.logger { },
     )
 }

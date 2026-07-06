@@ -2,12 +2,10 @@ package se.oyabun.prozess
 
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
-import reactor.core.publisher.Mono
 import reactor.core.publisher.Sinks
 import reactor.util.retry.Retry
 import se.oyabun.prozess.Logging
 import se.oyabun.prozess.Partition
-import se.oyabun.prozess.Partitions
 import se.oyabun.prozess.PollerAlreadyRunning
 import se.oyabun.prozess.PollerNotRunning
 import se.oyabun.prozess.Position
@@ -16,7 +14,6 @@ import se.oyabun.prozess.Topic
 import se.oyabun.prozess.InMemoryReceivedBuffer
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
@@ -26,8 +23,8 @@ class BufferedPollerTest {
 
     @Test
     fun `pauses on buffer saturation`() {
+        val client = FakeKafkaClient()
         val pauseLatch = CountDownLatch(1)
-        val pollQueue = java.util.ArrayDeque<List<Received>>()
         val buffer = InMemoryReceivedBuffer(highWaterMark = 500, onPause = { pauseLatch.countDown() })
         val topicPartition = Partition(0, Topic("test"))
         val assignments = java.util.concurrent.atomic.AtomicReference(setOf(topicPartition))
@@ -35,12 +32,10 @@ class BufferedPollerTest {
         val shutdownSink = Sinks.one<Unit>()
 
         repeat(495) { buffer.offer(received(topicPartition)) }
-        pollQueue.addLast((1..10).map { received(topicPartition) })
+        client.queuePollResults((1..10).map { received(topicPartition) })
 
         val poller = BufferedPoller(
-            poll = Poller.Poll { Mono.just(pollQueue.pollFirst() ?: emptyList()) },
-            pause = Poller.Pause { Mono.just(it) },
-            resume = Poller.Resume { Mono.just(it) },
+            client = client,
             buffer = buffer,
             assignments = { assignments.get() },
             instanceId = "test-poller",
@@ -91,15 +86,14 @@ class BufferedPollerTest {
 
     @Test
     fun `signals done on pipeline completion`() {
+        val client = FakeKafkaClient()
         val done = Sinks.one<Unit>()
         val shutdownSink = Sinks.one<Unit>()
         val buffer = InMemoryReceivedBuffer()
         val assignments = java.util.concurrent.atomic.AtomicReference(setOf(Partition(0, Topic("test"))))
 
         val poller = BufferedPoller(
-            poll = Poller.Poll { Mono.just(emptyList()) },
-            pause = Poller.Pause { Mono.just(it) },
-            resume = Poller.Resume { Mono.just(it) },
+            client = client,
             buffer = buffer,
             assignments = { assignments.get() },
             instanceId = "test-done",
@@ -147,12 +141,11 @@ class BufferedPollerTest {
     }
 
     private fun createPoller(): BufferedPoller {
+        val client = FakeKafkaClient()
         val buffer = InMemoryReceivedBuffer()
         val assignments = java.util.concurrent.atomic.AtomicReference(setOf(Partition(0, Topic("test"))))
         return BufferedPoller(
-            poll = Poller.Poll { Mono.just(emptyList()) },
-            pause = Poller.Pause { Mono.just(it) },
-            resume = Poller.Resume { Mono.just(it) },
+            client = client,
             buffer = buffer,
             assignments = { assignments.get() },
             instanceId = "test",

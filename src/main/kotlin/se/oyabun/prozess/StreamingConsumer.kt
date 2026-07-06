@@ -4,7 +4,6 @@ import se.oyabun.prozess.Prozess.ConsumerFilter
 import se.oyabun.prozess.Prozess.ConsumerProcess
 import se.oyabun.prozess.StartOffset.AtTimestamp
 import se.oyabun.prozess.StartOffset.Earliest
-import reactor.core.Disposable
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 import reactor.core.publisher.Mono.delay
@@ -24,11 +23,6 @@ import se.oyabun.prozess.Retrying.withRetries
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
-import kotlin.concurrent.atomics.fetchAndUpdate
-import kotlin.concurrent.atomics.update
-import org.apache.kafka.clients.consumer.ConsumerRebalanceListener
-import org.apache.kafka.common.TopicPartition
-import kotlin.time.Clock
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
@@ -41,10 +35,11 @@ class StreamingConsumer<M>(
     private val deserializer: Prozess.Deserializer<M>,
     private val process: ConsumerProcess<M> = { _,_ -> },
     instance: String? = "consumer",
+    private val client: KafkaClient = ThreadsafeKafkaClient(config),
 ) {
     private val log = Logging.logger { }
     private val instanceId = "[$instance ${config.topics} consumer]"
-    private val client = ThreadsafeKafkaClient(config)
+
     private val ends = AtomicReference<Positions>(emptySet())
     private val started = AtomicBoolean(false)
     private val highWaterMark = config.maxPollRecords
@@ -76,16 +71,14 @@ class StreamingConsumer<M>(
         log = log,
     )
     private val committer: Committer = BufferedCommitter(
-        commit = { offsets -> client.commit(offsets, "$instanceId@${Clock.System.now()}") },
-        assignments = partitionManager::assignments,
+        client = client,
         instanceId = instanceId,
+        assignments = partitionManager::assignments,
         log = log,
         bufferSize = config.maxPollRecords,
     )
     private val poller: Poller = BufferedPoller(
-        poll = client::poll,
-        pause = client::pause,
-        resume = client::resume,
+        client = client,
         buffer = buffer,
         assignments = partitionManager::assignments,
         instanceId = instanceId,
@@ -149,16 +142,12 @@ class StreamingConsumer<M>(
         .flatMapMany { topicPartitions ->
             val awaitSubscription = client.subscribe(
                 config.topics,
-                object : ConsumerRebalanceListener {
-                    override fun onPartitionsRevoked(partitions: MutableCollection<TopicPartition>) {
-                        val ctx = client.rebalanceContext()
-                        val parts = partitions.map { Partition(it.partition(), Topic(it.topic())) }.toSet()
-                        partitionManager.onPartitionsRevoked(ctx, parts, committer.processedOffsets)
+                object : RebalanceListener {
+                    override fun onPartitionsRevoked(context: RebalanceContext, partitions: Partitions) {
+                        partitionManager.onPartitionsRevoked(context, partitions, committer.processedOffsets)
                     }
-                    override fun onPartitionsAssigned(partitions: MutableCollection<TopicPartition>) {
-                        val ctx = client.rebalanceContext()
-                        val parts = partitions.map { Partition(it.partition(), Topic(it.topic())) }.toSet()
-                        val seeds = partitionManager.onPartitionsAssigned(ctx, parts)
+                    override fun onPartitionsAssigned(context: RebalanceContext, partitions: Partitions) {
+                        val seeds = partitionManager.onPartitionsAssigned(context, partitions)
                         if (seeds.isNotEmpty()) committer.seedOffsets(seeds)
                     }
                 },

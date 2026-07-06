@@ -24,13 +24,6 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.toJavaDuration
 
-/**
- * Polls a Kafka consumer on a single thread and pushes [Received] records into a shared buffer.
- *
- * Lifecycle: [start] → running → [stop] (or pipeline completes via [shutdown] signal).
- * [pause]/[resume] control the underlying Kafka consumer partition assignment state.
- * The buffer watermark back-pressure is owned by [InMemoryReceivedBuffer].
- */
 interface Poller {
 
     fun start()
@@ -38,27 +31,10 @@ interface Poller {
     fun pause()
     fun resume()
     val isRunning: Boolean
-
-    /** SAM interface for the poll operation. */
-    fun interface Poll {
-        fun poll(): Mono<List<Received>>
-    }
-
-    /** SAM interface for the partition pause operation. */
-    fun interface Pause {
-        fun pause(partitions: Partitions): Mono<Partitions>
-    }
-
-    /** SAM interface for the partition resume operation. */
-    fun interface Resume {
-        fun resume(partitions: Partitions): Mono<Partitions>
-    }
 }
 
 internal class BufferedPoller(
-    private val poll: Poller.Poll,
-    private val pause: Poller.Pause,
-    private val resume: Poller.Resume,
+    private val client: KafkaClient,
     private val buffer: ReceivedBuffer,
     private val assignments: () -> Partitions,
     private val instanceId: String,
@@ -102,7 +78,7 @@ internal class BufferedPoller(
         if (!running.get()) throw PollerNotRunning("$instanceId is not running")
         val current = assignments()
         if (current.isNotEmpty()) {
-            pause.pause(current).block()
+            client.pause(current).block()
         }
     }
 
@@ -110,7 +86,7 @@ internal class BufferedPoller(
         if (!running.get()) throw PollerNotRunning("$instanceId is not running")
         val current = assignments()
         if (current.isNotEmpty()) {
-            resume.resume(current).block()
+            client.resume(current).block()
         }
     }
 
@@ -119,7 +95,7 @@ internal class BufferedPoller(
     private fun pollingPipeline(timer: Scheduler): Disposable = Flux.interval(pollInterval.toJavaDuration(), timer)
         .onBackpressureDrop()
         .concatMap {
-            poll.poll()
+            client.poll()
                 .withRetries(id = instanceId, retryOn = anyException, maxAttempts = infiniteRetries)
         }
         .doOnNext { records -> if (records.isNotEmpty()) log.kafka.polled(instanceId, records.size) }

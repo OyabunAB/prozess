@@ -10,6 +10,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
@@ -126,7 +127,7 @@ class ShutdownCoordinatorTest {
         onClose: () -> Mono<Void> = { Mono.empty() },
     ) = object : ShutdownableClient {
         override fun wakeup() = onWakeup()
-        override fun close() = onClose()
+        override fun close(timeout: Duration) = onClose()
     }
 
     private fun closeSignal(): Sinks.One<Unit> = Sinks.one()

@@ -4,7 +4,6 @@ import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 import reactor.core.scheduler.Schedulers
 import reactor.util.retry.RetryBackoffSpec
-import se.oyabun.prozess.Logging
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicLong
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
@@ -28,30 +27,8 @@ object Retrying {
         retryOn: (Throwable) -> Boolean,
         fallback: X? = null,
     ): Mono<X> {
-        val total = AtomicLong(0)
-        val recovering = AtomicBoolean(false)
-        val spec = when (minBackoff) {
-            null -> RetryBackoffSpec.fixedDelay(maxAttempts, fixedDelay.toJavaDuration())
-            else -> RetryBackoffSpec.backoff(maxAttempts, minBackoff.toJavaDuration())
-        }
-        val retried = retryWhen(
-            spec.filter { retryOn.invoke(it) }
-                .doBeforeRetry { signal ->
-                    total.incrementAndFetch()
-                    recovering.compareAndSet(expectedValue = false, newValue = true)
-                    val attempt = if (maxAttempts == Long.MAX_VALUE) {
-                        "indefinitely"
-                    } else {
-                        "attempt ${signal.totalRetriesInARow() + 1} of $maxAttempts"
-                    }
-                    log.retry.retrying(id, attempt, signal.totalRetries(), signal.failure())
-                }
-                .onRetryExhaustedThrow { _, signal ->
-                    signal.failure().also { log.retry.exhausted(id, signal.totalRetries(), it) }
-                },
-        )
-            .doOnSuccess { if (recovering.load()) log.retry.recovered(id, total.load()) }
-            .subscribeOn(Schedulers.boundedElastic())
+        val retrySpec = backingOff(minBackoff, maxAttempts, retryOn, id)
+        val retried = retryWhen(retrySpec).subscribeOn(Schedulers.boundedElastic())
         return fallback?.let { retried.onErrorReturn(retryOn, it) } ?: retried
     }
 
@@ -63,28 +40,36 @@ object Retrying {
         retryOn: (Throwable) -> Boolean,
         fallback: X? = null,
     ): Flux<X> {
+        val retrySpec = backingOff(minBackoff, maxAttempts, retryOn, id)
+        val retried = retryWhen(retrySpec).subscribeOn(Schedulers.boundedElastic())
+        return fallback?.let { retried.onErrorReturn(retryOn, it) } ?: retried
+    }
+
+    @OptIn(ExperimentalAtomicApi::class)
+    private fun backingOff(
+        minBackoff: Duration?,
+        maxAttempts: Long,
+        retryOn: (Throwable) -> Boolean,
+        id: Any
+    ): RetryBackoffSpec {
         val total = AtomicLong(0)
         val recovering = AtomicBoolean(false)
-        val spec = when (minBackoff) {
+        return when (minBackoff) {
             null -> RetryBackoffSpec.fixedDelay(maxAttempts, fixedDelay.toJavaDuration())
             else -> RetryBackoffSpec.backoff(maxAttempts, minBackoff.toJavaDuration())
         }
-        val retried = retryWhen(
-            spec.filter { retryOn.invoke(it) }
-                .doBeforeRetry { signal ->
-                    total.incrementAndFetch()
-                    recovering.compareAndSet(expectedValue = false, newValue = true)
-                    val attempt = if (maxAttempts == Long.MAX_VALUE) {
-                        "indefinitely"
-                    } else {
-                        "attempt ${signal.totalRetriesInARow() + 1} of $maxAttempts"
-                    }
-                    log.retry.retrying(id, attempt, signal.totalRetries(), signal.failure())
+            .filter { retryOn.invoke(it) }
+            .doBeforeRetry { signal ->
+                total.incrementAndFetch()
+                recovering.compareAndSet(expectedValue = false, newValue = true)
+                val attempt = when {
+                    maxAttempts == Long.MAX_VALUE -> "indefinitely"
+                    else -> "attempt ${signal.totalRetriesInARow() + 1} of $maxAttempts"
                 }
-                .onRetryExhaustedThrow { _, signal ->
-                    signal.failure().also { log.retry.exhausted(id, signal.totalRetries(), it) }
-                },
-        ).subscribeOn(Schedulers.boundedElastic())
-        return fallback?.let { retried.onErrorReturn(retryOn, it) } ?: retried
+                log.retry.retrying(id, attempt, signal.totalRetries(), signal.failure())
+            }
+            .onRetryExhaustedThrow { _, signal ->
+                signal.failure().also { log.retry.exhausted(id, signal.totalRetries(), it) }
+            }
     }
 }

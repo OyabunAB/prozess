@@ -6,12 +6,13 @@ import reactor.core.publisher.Mono.fromCallable
 import reactor.core.publisher.Mono.`when`
 import reactor.core.publisher.Sinks
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
 import kotlin.time.toJavaDuration
 
 /** Client contract for [ShutdownCoordinator] — wakeup + close. */
 interface ShutdownableClient {
     fun wakeup()
-    fun close(): Mono<Void>
+    fun close(timeout: Duration = 3.seconds): Mono<Void>
 }
 
 /**
@@ -36,15 +37,12 @@ class ShutdownCoordinator(
     private val instanceId: String,
     private val log: Logger,
 ) {
-    fun shutdown(duration: Duration? = null) {
-        val task = fromCallable {
-            client.wakeup()
-            closeSignal.tryEmitEmpty()
-        }.then(
-            poller.stop().then(committer.stop())
-        ).then(defer { client.close() })
+    fun shutdown(timeout: Duration? = null) {
+        val task = fromCallable { client.wakeup(); closeSignal.tryEmitEmpty() }
+            .then(poller.stop().then(committer.stop()))
+            .then(defer { client.close() })
         try {
-            if (duration != null) task.block(duration.toJavaDuration())
+            if (timeout != null) task.block(timeout.toJavaDuration())
             else task.block()
         } catch (e: Exception) {
             log.kafka.terminatedUnexpectedly(instanceId, e)
