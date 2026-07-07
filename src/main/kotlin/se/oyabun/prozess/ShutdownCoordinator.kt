@@ -45,7 +45,8 @@ class ShutdownCoordinator(
             if (timeout != null) task.block(timeout.toJavaDuration())
             else task.block(10.seconds.toJavaDuration())
         } catch (e: Exception) {
-            log.kafka.terminatedUnexpectedly(instanceId, e)
+            val wrapped = TimeoutExpired("$instanceId shutdown timed out", e)
+            log.kafka.terminatedUnexpectedly(instanceId, wrapped)
             client.wakeup()
             try { client.close().block(3.seconds.toJavaDuration()) } catch (_: Exception) { }
         }

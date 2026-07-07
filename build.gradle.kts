@@ -15,15 +15,6 @@ repositories {
     mavenLocal()
 }
 
-configurations.all {
-    resolutionStrategy.eachDependency {
-        if (requested.group == "org.apache.kafka" && requested.name == "kafka-clients") {
-            useVersion("3.9.2")
-            because("CVE-2026-35554")
-        }
-    }
-}
-
 dependencies {
     api(libs.kafka.clients)
     api(libs.reactor.core)
