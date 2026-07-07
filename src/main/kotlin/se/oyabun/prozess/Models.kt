@@ -15,10 +15,23 @@ typealias Positions = Set<Position>
 fun Positions.asOffsets(): Offsets = associate { it.partition to it.offset }
 
 typealias Offsets = Map<Partition, Long>
+typealias Headers = List<Header>
 
 sealed interface ReceivedKey {
     data class Value(val key: String) : ReceivedKey
     data object None : ReceivedKey
+}
+
+data class Header(
+    val key: String,
+    val value: ByteArray,
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is Header) return false
+        return key == other.key && value.contentEquals(other.value)
+    }
+    override fun hashCode(): Int = 31 * key.hashCode() + value.contentHashCode()
 }
 
 sealed interface ReceivedMessage {
@@ -37,6 +50,7 @@ data class Received(
     val key: ReceivedKey,
     val message: ReceivedMessage,
     val position: Position,
+    val headers: Headers = emptyList(),
 )
 
 sealed interface EndOffset {

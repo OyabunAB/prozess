@@ -167,6 +167,40 @@ class KafkaTests {
             producer.close()
             producer.close()
         }
+
+        @Test
+        fun `send with headers and consume`() {
+            val topicName = topic(bootstrapServers)
+            val groupId = groupId()
+            val payload = "hello-headers"
+
+            val producer = Prozess.producer<String>(
+                ProducerConfig(bootstrapServers, Topic(topicName)),
+                { it.toByteArray() },
+            )
+            val testHeaders = listOf(Header("trace-id", "abc123".toByteArray()), Header("content-type", "json".toByteArray()))
+            producer.send("k", payload, headers = testHeaders)
+            producer.close()
+
+            val receivedHeaders = mutableListOf<Headers>()
+            val latch = CountDownLatch(1)
+            val config = ConsumerConfig(bootstrapServers, groupId, setOf(topicName))
+            val consumer = stringConsumer(config) { received, _ ->
+                receivedHeaders.add(received.headers)
+                latch.countDown()
+            }
+            consumer.start(from = StartOffset.Earliest)
+            assertTrue(latch.await(5, TimeUnit.SECONDS), "timed out waiting for message")
+            consumer.shutdown()
+
+            assertEquals(1, receivedHeaders.size)
+            val headers = receivedHeaders[0]
+            assertEquals(2, headers.size)
+            assertEquals("trace-id", headers[0].key)
+            assertTrue(headers[0].value.contentEquals("abc123".toByteArray()))
+            assertEquals("content-type", headers[1].key)
+            assertTrue(headers[1].value.contentEquals("json".toByteArray()))
+        }
     }
 
     @Nested

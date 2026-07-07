@@ -5,6 +5,7 @@ import kotlin.time.Duration
 object Prozess {
     typealias KeyExtraction<M> = (M) -> String
     typealias Serializer<M> = (M) -> ByteArray
+    typealias HeadersProvider<M> = (M) -> Headers
 
     sealed interface DeserializationResult<out M> {
         data class Message<M>(val value: M) : DeserializationResult<M>
@@ -15,7 +16,7 @@ object Prozess {
     typealias Deserializer<M> = (Received) -> DeserializationResult<M>
 
     interface Producer<M> {
-        fun send(key: String, value: M, partition: Int? = null, timestamp: Long? = null): Long
+        fun send(key: String, value: M, partition: Int? = null, timestamp: Long? = null, headers: Headers = emptyList()): Long
         fun initTransactions()
         fun beginTransaction()
         fun commitTransaction()
@@ -77,7 +78,7 @@ object Prozess {
         instance: String? = "producer",
     ): Producer<M> = object : Producer<M> {
         val delegate = StreamingProducer(config, instance, serializer)
-        override fun send(key: String, value: M, partition: Int?, timestamp: Long?): Long { return delegate.send(key, value, partition, timestamp).blockOptional().orElseThrow() }
+        override fun send(key: String, value: M, partition: Int?, timestamp: Long?, headers: Headers): Long { return delegate.send(key, value, partition, timestamp, headers).blockOptional().orElseThrow() }
         override fun sendOffsetsToTransaction(offsets: Offsets, member: GroupMember) { delegate.sendOffsetsToTransaction(offsets, member).block() }
         override fun initTransactions() { delegate.initTransactions().block() }
         override fun beginTransaction() { delegate.beginTransaction().block() }
