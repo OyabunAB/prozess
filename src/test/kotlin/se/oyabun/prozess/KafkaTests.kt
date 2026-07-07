@@ -295,9 +295,8 @@ class KafkaTests {
                 latch.countDown()
             }
             consumer.start(from = StartOffset.Latest)
+            awaitAssignments(consumer)
 
-            // Wait for assignment to stabilize before publishing new messages
-            Thread.sleep(2000)
             val newMessages = publish(bootstrapServers, topicName, count = 5)
 
             assertTrue(latch.await(5, TimeUnit.SECONDS), "timed out waiting for new messages, got ${received.size}")
@@ -315,13 +314,10 @@ class KafkaTests {
             val topicName = topic(bootstrapServers)
             val groupId = groupId()
 
-            val beforeTimestamp = System.currentTimeMillis()
             val earlyMessages = listOf("early-1", "early-2", "early-3")
-            publishAt(bootstrapServers, topicName, earlyMessages, timestamp = beforeTimestamp - 10_000)
+            publishAt(bootstrapServers, topicName, earlyMessages, timestamp = System.currentTimeMillis() - 10_000)
 
-            Thread.sleep(100)
             val targetTimestamp = System.currentTimeMillis()
-            Thread.sleep(100)
 
             val lateMessages = listOf("late-1", "late-2", "late-3")
             publishAt(bootstrapServers, topicName, lateMessages, timestamp = targetTimestamp + 1000)
@@ -402,7 +398,6 @@ class KafkaTests {
 
             // Publish more after catch-up — should not be received
             val afterMessages = publish(bootstrapServers, topicName, count = 5)
-            Thread.sleep(500)
             consumer.shutdown()
 
             assertEquals(published.sorted(), received.sorted().toList(), "Should receive exactly the original messages")
@@ -445,9 +440,7 @@ class KafkaTests {
             val earlyMessages = listOf("early-1", "early-2")
             publishAt(bootstrapServers, topicName, earlyMessages, timestamp = System.currentTimeMillis() - 10_000)
 
-            Thread.sleep(100)
             val targetTimestamp = System.currentTimeMillis()
-            Thread.sleep(100)
 
             val lateMessages = listOf("late-1", "late-2", "late-3")
             publishAt(bootstrapServers, topicName, lateMessages, timestamp = targetTimestamp + 1000)
