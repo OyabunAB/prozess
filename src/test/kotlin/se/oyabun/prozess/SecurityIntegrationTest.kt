@@ -184,7 +184,7 @@ class SecurityIntegrationTest {
         )
         val consumer = Prozess.consumer(
             config = consumerConfig,
-            deserializer = { String(it) },
+            deserializeBytes = { String(it) },
             process = { _, msg ->
                 received.add(msg)
                 latch.countDown()

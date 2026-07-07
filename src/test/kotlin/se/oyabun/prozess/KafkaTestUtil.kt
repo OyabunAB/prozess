@@ -11,6 +11,8 @@ import org.apache.kafka.common.serialization.StringSerializer
 import reactor.core.publisher.Sinks
 import java.time.Duration
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.time.toJavaDuration
 import kotlin.time.Duration.Companion.seconds
 
@@ -74,4 +76,20 @@ fun publishToPartition(bootstrapServers: String, topic: String, partition: Int, 
 fun addPartitions(bootstrapServers: String, topic: String, totalPartitions: Int) {
     AdminClient.create(mapOf(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG to bootstrapServers))
         .use { it.createPartitions(mapOf(topic to org.apache.kafka.clients.admin.NewPartitions.increaseTo(totalPartitions))).all().get() }
+}
+
+/**
+ * Blocks until every consumer has received at least one [ConsumerEvent.Assigned] event.
+ * Must be called BEFORE [Prozess.Consumer.start] so the subscription is active when the event fires.
+ */
+fun awaitAssignments(vararg consumers: Prozess.Consumer<*>, timeoutSeconds: Long = 30) {
+    val latch = CountDownLatch(consumers.size)
+    consumers.forEach { consumer ->
+        consumer.onEvent { event ->
+            if (event is ConsumerEvent.Assigned) latch.countDown()
+        }
+    }
+    check(latch.await(timeoutSeconds, TimeUnit.SECONDS)) {
+        "Timed out waiting for partition assignments (${latch.count} consumers still unassigned)"
+    }
 }

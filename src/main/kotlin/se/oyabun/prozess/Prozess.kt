@@ -34,6 +34,7 @@ object Prozess {
         fun hasNoAssignments(): Boolean
         fun position(partition: Partition): Long
         fun lag(partition: Partition): Long
+        fun onEvent(callback: (ConsumerEvent) -> Unit)
     }
 
     private fun <M : Any> simpleDeserializer(deserializeBytes: (ByteArray) -> M): Deserializer<M> = { received ->
@@ -70,6 +71,7 @@ object Prozess {
         override fun hasNoAssignments(): Boolean = delegate.hasNoAssignments()
         override fun position(partition: Partition): Long = delegate.position(partition)
         override fun lag(partition: Partition): Long = delegate.lag(partition)
+        override fun onEvent(callback: (ConsumerEvent) -> Unit) = delegate.onEvent(callback)
     }
 
     fun <M : Any> producer(

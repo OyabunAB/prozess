@@ -126,11 +126,10 @@ class RebalanceKafkaTests {
             val topicName = topic(bootstrapServers, partitions = 2)
             val groupId = groupId()
             val count = 20
-            val published = publish(bootstrapServers, topicName, count = count)
-            val allDone = CountDownLatch(count)
 
             val messagesA = ConcurrentLinkedQueue<String>()
             val messagesB = ConcurrentLinkedQueue<String>()
+            val allDone = CountDownLatch(count)
 
             val consumerA = stringConsumer(
                 ConsumerConfig(bootstrapServers, groupId, setOf(topicName)),
@@ -149,9 +148,16 @@ class RebalanceKafkaTests {
             consumerA.start(from = StartOffset.Earliest)
             consumerB.start(from = StartOffset.Earliest)
 
+            // Wait for both consumers to receive partition assignments before producing.
+            // Without this, ConsumerA can fetch all messages before the rebalance assigns
+            // a partition to ConsumerB.
+            awaitAssignments(consumerA, consumerB)
+
             consumerA.pause()
             consumerA.pause()
             consumerA.resume()
+
+            val published = publish(bootstrapServers, topicName, count = count)
 
             assertTrue(
                 allDone.await(30, TimeUnit.SECONDS),
