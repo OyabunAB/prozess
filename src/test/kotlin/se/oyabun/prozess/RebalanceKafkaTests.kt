@@ -145,13 +145,10 @@ class RebalanceKafkaTests {
                 allDone.countDown()
             }
 
+            val assigned = onAssigned(consumerA, consumerB)
             consumerA.start(from = StartOffset.Earliest)
             consumerB.start(from = StartOffset.Earliest)
-
-            // Wait for both consumers to receive partition assignments before producing.
-            // Without this, ConsumerA can fetch all messages before the rebalance assigns
-            // a partition to ConsumerB.
-            awaitAssignments(consumerA, consumerB)
+            awaitLatch(assigned)
 
             consumerA.pause()
             consumerA.pause()
