@@ -171,10 +171,10 @@ class RebalanceKafkaTests {
 
     private fun stringConsumer(
         config: ConsumerConfig,
-        process: Prozess.ConsumerProcess<String> = { _, _ -> },
+        process: (Received, String) -> Unit = { _, _ -> },
     ) = Prozess.consumer(
         config = config,
-        deserializer = { String(it) },
+        deserializeBytes = { String(it) },
         process = process,
     )
 }

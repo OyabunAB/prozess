@@ -16,23 +16,28 @@ fun Positions.asOffsets(): Offsets = associate { it.partition to it.offset }
 
 typealias Offsets = Map<Partition, Long>
 
-data class Received(val key: String, val message: ByteArray, val position: Position) {
-    override fun equals(other: Any?): Boolean {
-        if (this === other) return true
-        if (javaClass != other?.javaClass) return false
-        other as Received
-        if (key != other.key) return false
-        if (!message.contentEquals(other.message)) return false
-        if (position != other.position) return false
-        return true
-    }
-    override fun hashCode(): Int {
-        var result = key.hashCode()
-        result = 31 * result + message.contentHashCode()
-        result = 31 * result + position.hashCode()
-        return result
-    }
+sealed interface ReceivedKey {
+    data class Value(val key: String) : ReceivedKey
+    data object None : ReceivedKey
 }
+
+sealed interface ReceivedMessage {
+    class Data(val bytes: ByteArray) : ReceivedMessage {
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is Data) return false
+            return bytes.contentEquals(other.bytes)
+        }
+        override fun hashCode(): Int = bytes.contentHashCode()
+    }
+    data object Tombstone : ReceivedMessage
+}
+
+data class Received(
+    val key: ReceivedKey,
+    val message: ReceivedMessage,
+    val position: Position,
+)
 
 sealed interface EndOffset {
     data object Continuous : EndOffset

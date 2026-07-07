@@ -144,8 +144,8 @@ internal class ThreadsafeKafkaClient(config: ConsumerConfig) : KafkaClient {
     private fun PartitionInfo.toPartition() = Partition(partition(), Topic(topic()))
 
     private fun ConsumerRecord<String, ByteArray>.toReceived() = Received(
-        key() ?: "",
-        value() ?: ByteArray(0),
+        key()?.let { ReceivedKey.Value(it) } ?: ReceivedKey.None,
+        value()?.let { ReceivedMessage.Data(it) } ?: ReceivedMessage.Tombstone,
         Position(Partition(partition(), Topic(topic())), offset()),
     )
 

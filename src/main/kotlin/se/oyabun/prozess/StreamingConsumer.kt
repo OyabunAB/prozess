@@ -1,6 +1,5 @@
 package se.oyabun.prozess
 
-import se.oyabun.prozess.Prozess.ConsumerFilter
 import se.oyabun.prozess.StartOffset.AtTimestamp
 import se.oyabun.prozess.StartOffset.Earliest
 import se.oyabun.prozess.StartOffset.Latest
@@ -26,7 +25,6 @@ import kotlin.time.toJavaDuration
 class StreamingConsumer<M : Any>(
     val config: ConsumerConfig,
     private val processor: Processor<M>,
-    private val filter: ConsumerFilter = { true },
     instance: String? = "consumer",
     private val client: KafkaClient = ThreadsafeKafkaClient(config),
 ) {
@@ -92,13 +90,7 @@ class StreamingConsumer<M : Any>(
         val sync = syncSignal(until, complete)
         incomingFeed(sync, closeSignal.asMono(), from, until)
             .groupBy { it.position.partition }
-            .flatMap { partition ->
-                partition.groupBy { filter(it) }
-                    .flatMap { grouped ->
-                        if (grouped.key()) processor.process(grouped)
-                        else grouped.map { it.position }
-                    }
-            }
+            .flatMap { partition -> processor.process(partition) }
             .flatMap { position -> committer.markProcessed(position) }
             .subscribe()
     }

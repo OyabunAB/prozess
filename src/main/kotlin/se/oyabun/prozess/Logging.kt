@@ -6,6 +6,7 @@ import mu.KotlinLogging
 class Logger(private val delegate: KLogger) {
     val kafka = Kafka()
     val retry = Retry()
+    val processing = Processing()
 
     inner class Kafka {
         fun subscribed(instance: String, topics: Any) = delegate.info { "$instance subscribed to $topics" }
@@ -62,6 +63,14 @@ class Logger(private val delegate: KLogger) {
         }
 
         fun recovered(id: Any, totalRetries: Long) = delegate.trace { "[$id] Recovered after $totalRetries retries." }
+    }
+
+    inner class Processing {
+        fun tombstone(position: Position) =
+            delegate.info { "tombstone at $position" }
+
+        fun poisonPill(position: Position, reason: String?) =
+            delegate.warn { "skipping poison pill at $position${reason?.let { ": $it" } ?: ""}" }
     }
 }
 

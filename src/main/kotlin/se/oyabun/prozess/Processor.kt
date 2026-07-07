@@ -5,9 +5,11 @@ import reactor.core.publisher.Flux
 import reactor.core.publisher.GroupedFlux
 import reactor.core.publisher.Mono
 import reactor.core.publisher.Mono.fromCallable
+import reactor.core.publisher.Mono.just
 import reactor.util.retry.Retry
+import reactor.util.retry.RetryBackoffSpec
+import se.oyabun.prozess.Prozess.DeserializationResult
 import se.oyabun.prozess.Prozess.Deserializer
-import java.util.function.Function
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.toJavaDuration
@@ -89,12 +91,25 @@ class DefaultProcessor<M : Any> private constructor(
             maxConcurrency: Int = 1,
         ): DefaultProcessor<M> {
             val spec = retrySpec(retryConfig, "process")
-
+            val log = Logging.logger { }
             fun processOne(received: Received): Mono<Position> =
-                fromCallable { deserializer(received.message) }
-                    .map { Processable(received, it) }
-                    .map { p -> handler(p); received.position }
-                    .retryWhen(spec)
+                fromCallable {
+                    when (val result = deserializer(received)) {
+                        is DeserializationResult.Message -> {
+                            handler(Processable(received, result.value))
+                            received.position
+                        }
+                        is DeserializationResult.Tombstone -> {
+                            log.processing.tombstone(received.position)
+                            received.position
+                        }
+                        is DeserializationResult.PoisonPill -> {
+                            log.processing.poisonPill(received.position, result.reason)
+                            received.position
+                        }
+                    }
+                }
+                .retryWhen(spec)
 
             return DefaultProcessor { partition ->
                 partition.flatMapSequential(maxConcurrency) { received ->
@@ -111,30 +126,49 @@ class DefaultProcessor<M : Any> private constructor(
             deserializer: Deserializer<M>,
             handler: (List<Processable<M>>) -> Unit,
             batchSize: Int,
-            batchDuration: Duration? = null,
+            batchDuration: Duration = Duration.INFINITE,
             retryConfig: RetryConfig = RetryConfig(),
             maxConcurrency: Int = 1,
         ): DefaultProcessor<M> {
             val spec = retrySpec(retryConfig, "batch")
+            val log = Logging.logger { }
 
             fun processBatch(messages: List<Received>): Flux<Position> =
-                fromCallable {
-                    val processables = messages.map { Processable(it, deserializer(it.message)) }
-                    handler(processables)
-                    messages.map { it.position }
-                }
-                    .flatMapMany { Flux.fromIterable(it) }
-                    .retryWhen(spec)
+                Flux.fromIterable(messages)
+                    .flatMap { received ->
+                        fromCallable {
+                            when (val result = deserializer(received)) {
+                                is DeserializationResult.Message ->
+                                    BatchItem(Processable(received, result.value))
+                                is DeserializationResult.Tombstone -> {
+                                    log.processing.tombstone(received.position)
+                                    BatchItem(ack = received.position)
+                                }
+                                is DeserializationResult.PoisonPill -> {
+                                    log.processing.poisonPill(received.position, result.reason)
+                                    BatchItem(ack = received.position)
+                                }
+                            }
+                        }
+                        .retryWhen(spec)
+                    }
+                    .collectList()
+                    .flatMapMany { items ->
+                        val processables: List<Processable<M>> = items.mapNotNull { it.processable }
+                        val acks = items.mapNotNull { it.ack }
+                        if (processables.isEmpty()) Flux.fromIterable(acks)
+                        else fromCallable {
+                            handler(processables)
+                            processables.map { it.received.position } + acks
+                        }.flatMapMany { Flux.fromIterable(it.sortedBy { it.offset }) }
+                            .retryWhen(spec)
+                    }
 
             return DefaultProcessor { partition ->
-                val batched = if (batchDuration != null) {
-                    partition.bufferTimeout(batchSize, batchDuration.toJavaDuration())
-                } else {
-                    partition.buffer(batchSize)
-                }
-                batched.flatMapSequential(maxConcurrency) { messages ->
-                    processBatch(messages)
-                }
+                partition.bufferTimeout(batchSize, batchDuration.toJavaDuration())
+                    .flatMapSequential(maxConcurrency) { messages ->
+                        processBatch(messages)
+                    }
             }
         }
 
@@ -151,19 +185,33 @@ class DefaultProcessor<M : Any> private constructor(
             concurrency: Int = 1,
         ): DefaultProcessor<M> {
             val spec = retrySpec(retryConfig, "grouped")
+            val log = Logging.logger { }
 
             fun partitionPipeline(partition: Flux<Received>): Flux<Position> {
                 val tracker = ContiguousOffsetTracker()
-                return partition
-                    .flatMap { received: Received ->
-                        fromCallable { Processable(received, deserializer(received.message)) }
-                            .retryWhen(spec)
-                    }
-                    .groupBy { processable -> keyExtractor(processable) }
-                    .flatMap(concurrency) { grouped: GroupedFlux<K, Processable<M>> ->
-                        grouped.concatMap { processable: Processable<M> ->
-                            fromCallable { handler(grouped.key(), processable); processable.received.position }
-                                .retryWhen(spec)
+                return grouped(log, deserializer, keyExtractor, partition, spec)
+                    .flatMap(concurrency) { grouped ->
+                        when (val key = grouped.key()) {
+                            is GroupKey.Undefined -> grouped
+                                .mapNotNull { event ->
+                                    when (event) {
+                                        is GroupedEvent.Ignored -> event.position
+                                        is GroupedEvent.Message -> null
+                                    }
+                                }
+                            is GroupKey.Defined -> {
+                                grouped
+                                    .mapNotNull { event ->
+                                        when (event) {
+                                            is GroupedEvent.Message -> event.processable
+                                            is GroupedEvent.Ignored -> null
+                                        }
+                                    }
+                                    .concatMap { p: Processable<M> ->
+                                        fromCallable { handler(key.key, p); p.received.position }
+                                            .retryWhen(spec)
+                                    }
+                            }
                         }
                     }
                     .mapNotNull { position -> tracker.onCompleted(position) }
@@ -182,33 +230,44 @@ class DefaultProcessor<M : Any> private constructor(
             keyExtractor: (Processable<M>) -> K,
             handler: (K, List<Processable<M>>) -> Unit,
             batchSize: Int,
-            batchDuration: Duration? = null,
+            batchDuration: Duration = Duration.INFINITE,
             retryConfig: RetryConfig = RetryConfig(),
             concurrency: Int = 1,
         ): DefaultProcessor<M> {
             val spec = retrySpec(retryConfig, "grouped-batch")
+            val log = Logging.logger { }
 
             fun partitionPipeline(partition: Flux<Received>): Flux<Position> {
                 val tracker = ContiguousOffsetTracker()
-                return partition
-                    .flatMap { received: Received ->
-                        fromCallable { Processable(received, deserializer(received.message)) }
-                            .retryWhen(spec)
-                    }
-                    .groupBy { processable -> keyExtractor(processable) }
-                    .flatMap(concurrency) { grouped: GroupedFlux<K, Processable<M>> ->
-                        val batched: Flux<List<Processable<M>>> = if (batchDuration != null)
-                            grouped.bufferTimeout(batchSize, batchDuration.toJavaDuration())
-                        else
-                            grouped.buffer(batchSize)
-
-                        batched.concatMap { processables: List<Processable<M>> ->
-                            fromCallable {
-                                handler(grouped.key(), processables)
-                                processables.map { it.received.position }
+                return grouped(log, deserializer, keyExtractor, partition, spec)
+                    .flatMap(concurrency) { grouped ->
+                        when (val key = grouped.key()) {
+                            is GroupKey.Undefined -> grouped
+                                .mapNotNull { event ->
+                                    when (event) {
+                                        is GroupedEvent.Ignored -> event.position
+                                        is GroupedEvent.Message -> null
+                                    }
+                                }
+                            is GroupKey.Defined -> {
+                                grouped
+                                    .mapNotNull { event ->
+                                        when (event) {
+                                            is GroupedEvent.Message -> event.processable
+                                            is GroupedEvent.Ignored -> null
+                                        }
+                                    }
+                                    .bufferTimeout(batchSize, batchDuration.toJavaDuration())
+                                    .filter { it.isNotEmpty() }
+                                    .concatMap { batch: List<Processable<M>> ->
+                                        fromCallable {
+                                            handler(key.key, batch)
+                                            batch.map { it.received.position }
+                                        }
+                                            .flatMapMany { Flux.fromIterable(it) }
+                                            .retryWhen(spec)
+                                    }
                             }
-                                .flatMapMany { Flux.fromIterable(it) }
-                                .retryWhen(spec)
                         }
                     }
                     .mapNotNull { position -> tracker.onCompleted(position) }
@@ -216,5 +275,52 @@ class DefaultProcessor<M : Any> private constructor(
 
             return DefaultProcessor { partition -> partitionPipeline(partition) }
         }
+        private fun <K, M> grouped(
+            log: Logger,
+            deserializer: Deserializer<M>,
+            keyExtractor: (Processable<M>) -> K,
+            partition: Flux<Received>,
+            spec: RetryBackoffSpec,
+        ): Flux<GroupedFlux<GroupKey<K>, GroupedEvent<M>>> = partition
+            .flatMap { received ->
+                fromCallable {
+                    when (val result = deserializer(received)) {
+                        is DeserializationResult.Message ->
+                            GroupedEvent.Message(Processable(received, result.value))
+
+                        is DeserializationResult.Tombstone -> {
+                            log.processing.tombstone(received.position)
+                            GroupedEvent.Ignored(received.position)
+                        }
+
+                        is DeserializationResult.PoisonPill -> {
+                            log.processing.poisonPill(received.position, result.reason)
+                            GroupedEvent.Ignored(received.position)
+                        }
+                    }
+                }
+                .retryWhen(spec)
+            }
+            .groupBy { event ->
+                when (event) {
+                    is GroupedEvent.Message -> GroupKey.Defined(keyExtractor(event.processable))
+                    is GroupedEvent.Ignored -> GroupKey.Undefined
+                }
+            }
     }
+}
+
+private data class BatchItem<M>(
+    val processable: Processable<M>? = null,
+    val ack: Position? = null,
+)
+
+private sealed class GroupedEvent<out M> {
+    class Message<M>(val processable: Processable<M>) : GroupedEvent<M>()
+    class Ignored(val position: Position) : GroupedEvent<Nothing>()
+}
+
+private sealed class GroupKey<out K> {
+    data class Defined<K>(val key: K) : GroupKey<K>()
+    data object Undefined : GroupKey<Nothing>()
 }
