@@ -147,6 +147,7 @@ internal class ThreadsafeKafkaClient(config: ConsumerConfig) : KafkaClient {
         key()?.let { ReceivedKey.Value(it) } ?: ReceivedKey.None,
         value()?.let { ReceivedMessage.Data(it) } ?: ReceivedMessage.Tombstone,
         Position(Partition(partition(), Topic(topic())), offset()),
+        headers().iterator().asSequence().map { Header(it.key(), it.value()) }.toList(),
     )
 
     private fun Map.Entry<TopicPartition, Long>.toPosition() =
