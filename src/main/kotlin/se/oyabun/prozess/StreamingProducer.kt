@@ -33,7 +33,7 @@ class StreamingProducer<M : Any>(
             delegate.send(
                 org.apache.kafka.clients.producer.ProducerRecord(config.topic.name, partition, timestamp, key, serializer(value), kafkaHeaders),
             ) { metadata, exception ->
-                if (exception != null) sink.error(exception)
+                if (exception != null) sink.error(SendFailure("$instanceId send failed", exception))
                 else sink.success(metadata.offset())
             }
         }.withRetries(id = instanceId, retryOn = anyException, maxAttempts = infiniteRetries)

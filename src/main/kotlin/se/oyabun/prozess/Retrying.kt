@@ -69,7 +69,9 @@ object Retrying {
                 log.retry.retrying(id, attempt, signal.totalRetries(), signal.failure())
             }
             .onRetryExhaustedThrow { _, signal ->
-                signal.failure().also { log.retry.exhausted(id, signal.totalRetries(), it) }
+                val cause = signal.failure()
+                log.retry.exhausted(id, signal.totalRetries(), cause)
+                ProzessException.classify("$id retries exhausted after ${signal.totalRetries()} attempts", cause)
             }
     }
 }

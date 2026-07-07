@@ -50,6 +50,8 @@ data class ConsumerConfig(
     val bootstrapServers: String,
     val groupId: String,
     val topics: Topics,
+    val clientId: String? = null,
+    val groupInstanceId: String? = null,
     val startOffset: StartOffset = StartOffset.Latest,
     val pollInterval: Duration = 100.milliseconds,
     val sessionTimeout: Duration = 45.seconds,
@@ -75,20 +77,23 @@ data class ConsumerConfig(
     }
 }
 
-internal fun ConsumerConfig.toKafkaProperties(): Map<String, Any> = mapOf(
-    ApacheConsumerConfig.BOOTSTRAP_SERVERS_CONFIG to bootstrapServers,
-    ApacheConsumerConfig.GROUP_ID_CONFIG to groupId,
-    ApacheConsumerConfig.AUTO_OFFSET_RESET_CONFIG to startOffset.autoOffsetReset(),
-    ApacheConsumerConfig.SESSION_TIMEOUT_MS_CONFIG to sessionTimeout.inWholeMilliseconds.toInt(),
-    ApacheConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG to heartbeatInterval.inWholeMilliseconds.toInt(),
-    ApacheConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG to maxPollInterval.inWholeMilliseconds.toInt(),
-    ApacheConsumerConfig.MAX_POLL_RECORDS_CONFIG to maxPollRecords,
-    ApacheConsumerConfig.FETCH_MIN_BYTES_CONFIG to fetchMinBytes,
-    ApacheConsumerConfig.FETCH_MAX_BYTES_CONFIG to fetchMaxBytes,
-    ApacheConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG to fetchMaxWait.inWholeMilliseconds.toInt(),
-    ApacheConsumerConfig.MAX_PARTITION_FETCH_BYTES_CONFIG to maxPartitionFetchBytes,
-    ApacheConsumerConfig.ISOLATION_LEVEL_CONFIG to isolationLevel.value,
-) + security.toProperties()
+internal fun ConsumerConfig.toKafkaProperties(): Map<String, Any> = buildMap {
+    put(ApacheConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers)
+    put(ApacheConsumerConfig.GROUP_ID_CONFIG, groupId)
+    clientId?.let { put(ApacheConsumerConfig.CLIENT_ID_CONFIG, it) }
+    groupInstanceId?.let { put(ApacheConsumerConfig.GROUP_INSTANCE_ID_CONFIG, it) }
+    put(ApacheConsumerConfig.AUTO_OFFSET_RESET_CONFIG, startOffset.autoOffsetReset())
+    put(ApacheConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, sessionTimeout.inWholeMilliseconds.toInt())
+    put(ApacheConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG, heartbeatInterval.inWholeMilliseconds.toInt())
+    put(ApacheConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, maxPollInterval.inWholeMilliseconds.toInt())
+    put(ApacheConsumerConfig.MAX_POLL_RECORDS_CONFIG, maxPollRecords)
+    put(ApacheConsumerConfig.FETCH_MIN_BYTES_CONFIG, fetchMinBytes)
+    put(ApacheConsumerConfig.FETCH_MAX_BYTES_CONFIG, fetchMaxBytes)
+    put(ApacheConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG, fetchMaxWait.inWholeMilliseconds.toInt())
+    put(ApacheConsumerConfig.MAX_PARTITION_FETCH_BYTES_CONFIG, maxPartitionFetchBytes)
+    put(ApacheConsumerConfig.ISOLATION_LEVEL_CONFIG, isolationLevel.value)
+    putAll(security.toProperties())
+}
 
 private fun StartOffset.autoOffsetReset(): String = when (this) {
     is StartOffset.Earliest -> "earliest"
