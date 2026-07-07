@@ -9,8 +9,7 @@ import org.junit.jupiter.api.TestInstance.Lifecycle
 import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.assertThrows
 import org.testcontainers.kafka.KafkaContainer
-import se.oyabun.prozess.Prozess.ConsumerFilter
-import se.oyabun.prozess.Prozess.ConsumerProcess
+import se.oyabun.prozess.Prozess.DeserializationResult
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -231,7 +230,12 @@ class KafkaTests {
             val consumer = StreamingConsumer(
                 config = config,
                 processor = DefaultProcessor.each(
-                    deserializer = { String(it) },
+                    deserializer = { r ->
+                        when (val msg = r.message) {
+                            is ReceivedMessage.Data -> Prozess.DeserializationResult.Message(String(msg.bytes))
+                            is ReceivedMessage.Tombstone -> Prozess.DeserializationResult.Tombstone
+                        }
+                    },
                     handler = { p ->
                         received.add(p.value)
                         latch.countDown()
@@ -439,7 +443,7 @@ class KafkaTests {
     inner class FilterTest {
 
         @Test
-        fun `filtered messages are skipped but offsets still advance`() {
+        fun `skipped messages are not replayed after restart`() {
             val topicName = topic(bootstrapServers)
             val groupId = groupId()
             val count = 20
@@ -449,20 +453,24 @@ class KafkaTests {
             val processedCount = java.util.concurrent.atomic.AtomicInteger(0)
             val allSeen = CountDownLatch(count)
 
-            // Filter: only process messages with even index (every other message)
             val messageIndex = java.util.concurrent.atomic.AtomicInteger(0)
             val consumer = Prozess.consumer(
                 config = ConsumerConfig(bootstrapServers, groupId, setOf(topicName)),
-                deserializer = { String(it) },
-                filter = {
+                deserializer = { received ->
                     allSeen.countDown()
-                    messageIndex.getAndIncrement() % 2 == 0
+                    if (messageIndex.getAndIncrement() % 2 == 0) {
+                        when (val msg = received.message) {
+                            is ReceivedMessage.Data -> Prozess.DeserializationResult.Message(String(msg.bytes))
+                            is ReceivedMessage.Tombstone -> Prozess.DeserializationResult.Tombstone
+                        }
+                    } else {
+                        Prozess.DeserializationResult.PoisonPill("skipped")
+                    }
                 },
-                process = { _, msg ->
-                    received.add(msg)
-                    processedCount.incrementAndGet()
-                },
-            )
+            ).each { p ->
+                received.add(p.value)
+                processedCount.incrementAndGet()
+            }
             consumer.start(from = StartOffset.Earliest)
             assertTrue(allSeen.await(5, TimeUnit.SECONDS), "not all messages passed through filter")
             consumer.shutdown()
@@ -544,12 +552,10 @@ class KafkaTests {
 
     private fun stringConsumer(
         config: ConsumerConfig,
-        filter: ConsumerFilter = { true },
-        process: ConsumerProcess<String> = { _, _ -> },
+        process: (Received, String) -> Unit = { _, _ -> },
     ) = Prozess.consumer(
         config = config,
-        filter = filter,
-        deserializer = { String(it) },
+        deserializeBytes = { String(it) },
         process = process,
     )
 }

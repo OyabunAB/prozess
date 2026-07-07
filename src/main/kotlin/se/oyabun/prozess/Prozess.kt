@@ -1,15 +1,18 @@
 package se.oyabun.prozess
 
-import se.oyabun.prozess.StreamingConsumer
-import se.oyabun.prozess.StreamingProducer
 import kotlin.time.Duration
 
 object Prozess {
     typealias KeyExtraction<M> = (M) -> String
     typealias Serializer<M> = (M) -> ByteArray
-    typealias Deserializer<M> = (ByteArray) -> M
-    typealias ConsumerFilter = (Received) -> Boolean
-    typealias ConsumerProcess<M> = (Received, M) -> Unit
+
+    sealed interface DeserializationResult<out M> {
+        data class Message<M>(val value: M) : DeserializationResult<M>
+        data object Tombstone : DeserializationResult<Nothing>
+        data class PoisonPill(val reason: String? = null) : DeserializationResult<Nothing>
+    }
+
+    typealias Deserializer<M> = (Received) -> DeserializationResult<M>
 
     interface Producer<M> {
         fun send(key: String, value: M, partition: Int? = null, timestamp: Long? = null): Long
@@ -32,13 +35,19 @@ object Prozess {
         fun lag(partition: Partition): Long
     }
 
+    private fun <M : Any> simpleDeserializer(deserializeBytes: (ByteArray) -> M): Deserializer<M> = { received ->
+        when (val message = received.message) {
+            is ReceivedMessage.Tombstone -> DeserializationResult.Tombstone
+            is ReceivedMessage.Data -> DeserializationResult.Message(deserializeBytes(message.bytes))
+        }
+    }
+
     fun <M : Any> consumer(
         config: ConsumerConfig,
-        deserializer: Deserializer<M>,
-        process: ConsumerProcess<M>,
-        filter: ConsumerFilter = { true },
+        deserializeBytes: (ByteArray) -> M,
+        process: (Received, M) -> Unit,
         instance: String? = "consumer",
-    ): Consumer<M> = ConsumerBuilder(config, deserializer, filter, instance)
+    ): Consumer<M> = ConsumerBuilder(config, simpleDeserializer(deserializeBytes), instance)
         .each { p -> process(p.received, p.value) }
 
     fun <M : Any> consumer(
@@ -49,10 +58,9 @@ object Prozess {
     private fun <M : Any> wrap(
         config: ConsumerConfig,
         processor: Processor<M>,
-        filter: ConsumerFilter,
         instance: String?,
     ): Consumer<M> = object : Consumer<M> {
-        private val delegate = StreamingConsumer(config, processor, filter, instance)
+        private val delegate = StreamingConsumer(config, processor, instance)
         override fun start(from: StartOffset, until: EndOffset) = delegate.start(from, until)
         override fun shutdown() = delegate.shutdown()
         override val isDisposed: Boolean get() = delegate.isDisposed
@@ -82,7 +90,6 @@ object Prozess {
     class ConsumerBuilder<M : Any>(
         private val config: ConsumerConfig,
         private val deserializer: Deserializer<M>,
-        private val filter: ConsumerFilter = { true },
         private val instance: String? = "consumer",
     ) {
         fun each(
@@ -98,8 +105,8 @@ object Prozess {
 
         /** Fetches messages into atomic batches of [size] or [duration] timeout, then processes each batch. */
         fun batch(
-            size: Int,
-            duration: Duration? = null,
+            size: Int = config.maxPollRecords,
+            duration: Duration = Duration.INFINITE,
             maxConcurrency: Int = 1,
             handler: (List<Processable<M>>) -> Unit,
         ): Consumer<M> = wrapProcessor(
@@ -114,13 +121,13 @@ object Prozess {
 
         /** Groups messages by an extracted key, enabling per-key ordered processing. */
         fun <TKey : Any> groupBy(extractor: (Processable<M>) -> TKey): GroupedConsumerBuilder<TKey, M> =
-            GroupedConsumerBuilder(config, deserializer, extractor, filter, instance)
+            GroupedConsumerBuilder(config, deserializer, extractor, instance)
 
         /** Uses a custom [Processor] implementation instead of the built-in strategies. */
         fun processor(custom: Processor<M>): Consumer<M> = wrapProcessor(custom)
 
         private fun wrapProcessor(processor: Processor<M>): Consumer<M> =
-            wrap(config, processor, filter, instance)
+            wrap(config, processor, instance)
     }
 
     /** Builds a [Consumer] that groups messages by a key for per-key ordered processing. */
@@ -128,7 +135,6 @@ object Prozess {
         private val config: ConsumerConfig,
         private val deserializer: Deserializer<M>,
         private val keyExtractor: (Processable<M>) -> K,
-        private val filter: ConsumerFilter = { true },
         private val instance: String? = "consumer",
     ) {
         /** Processes each message individually, grouped by key. Per-key ordering is preserved. */
@@ -136,7 +142,7 @@ object Prozess {
             concurrency: Int = 1,
             handler: (K, Processable<M>) -> Unit,
         ): Consumer<M> = wrapProcessor(
-            DefaultProcessor.groupedEach<K, M>(
+            DefaultProcessor.groupedEach(
                 deserializer = deserializer,
                 keyExtractor = keyExtractor,
                 handler = handler,
@@ -149,12 +155,12 @@ object Prozess {
          * then processes each batch as a unit. Per-key ordering is preserved.
          */
         fun batch(
-            size: Int,
-            duration: Duration? = null,
+            size: Int = config.maxPollRecords,
+            duration: Duration = Duration.INFINITE,
             concurrency: Int = 1,
             handler: (K, List<Processable<M>>) -> Unit,
         ): Consumer<M> = wrapProcessor(
-            DefaultProcessor.groupedBatch<K, M>(
+            DefaultProcessor.groupedBatch(
                 deserializer = deserializer,
                 keyExtractor = keyExtractor,
                 handler = handler,
@@ -165,6 +171,6 @@ object Prozess {
         )
 
         private fun wrapProcessor(processor: Processor<M>): Consumer<M> =
-            wrap(config, processor, filter, instance)
+            wrap(config, processor, instance)
     }
 }

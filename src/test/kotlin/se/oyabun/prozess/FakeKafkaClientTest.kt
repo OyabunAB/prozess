@@ -212,7 +212,12 @@ class FakeKafkaClientTest {
         fake.setPartitionsFor("test", setOf(p0))
 
         val processor = DefaultProcessor.each<String>(
-            deserializer = { String(it) },
+            deserializer = { r ->
+                when (val msg = r.message) {
+                    is ReceivedMessage.Data -> Prozess.DeserializationResult.Message(String(msg.bytes))
+                    is ReceivedMessage.Tombstone -> Prozess.DeserializationResult.Tombstone
+                }
+            },
             handler = {},
         )
         val consumer = StreamingConsumer(
@@ -237,7 +242,12 @@ class FakeKafkaClientTest {
         fake.setEndOffsetOfResult { 100L }
 
         val processor = DefaultProcessor.each<String>(
-            deserializer = { String(it) },
+            deserializer = { r ->
+                when (val msg = r.message) {
+                    is ReceivedMessage.Data -> Prozess.DeserializationResult.Message(String(msg.bytes))
+                    is ReceivedMessage.Tombstone -> Prozess.DeserializationResult.Tombstone
+                }
+            },
             handler = {},
         )
         val consumer = StreamingConsumer(
@@ -386,7 +396,12 @@ class FakeKafkaClientTest {
         fake.setPartitionsFor("test", setOf(p0))
 
         val processor = DefaultProcessor.each<String>(
-            deserializer = { String(it) },
+            deserializer = { r ->
+                when (val msg = r.message) {
+                    is ReceivedMessage.Data -> Prozess.DeserializationResult.Message(String(msg.bytes))
+                    is ReceivedMessage.Tombstone -> Prozess.DeserializationResult.Tombstone
+                }
+            },
             handler = {},
         )
         val consumer = StreamingConsumer(
@@ -405,8 +420,8 @@ class FakeKafkaClientTest {
     // ---- helpers ----
 
     private fun received(partition: Partition, offset: Long, message: String) =
-        Received("k-$offset", message.toByteArray(), Position(partition, offset))
+        Received(ReceivedKey.Value("k-$offset"), ReceivedMessage.Data(message.toByteArray()), Position(partition, offset))
 
     private fun received(partition: Partition, offset: Long): Received =
-        Received("k-$offset", ByteArray(0), Position(partition, offset))
+        Received(ReceivedKey.Value("k-$offset"), ReceivedMessage.Data(ByteArray(0)), Position(partition, offset))
 }
