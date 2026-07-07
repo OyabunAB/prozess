@@ -294,8 +294,10 @@ class KafkaTests {
                 received.add(msg)
                 latch.countDown()
             }
+
+            val assigned = onAssigned(consumer)
             consumer.start(from = StartOffset.Latest)
-            awaitAssignments(consumer)
+            awaitLatch(assigned)
 
             val newMessages = publish(bootstrapServers, topicName, count = 5)
 

@@ -79,17 +79,25 @@ fun addPartitions(bootstrapServers: String, topic: String, totalPartitions: Int)
 }
 
 /**
- * Blocks until every consumer has received at least one [ConsumerEvent.Assigned] event.
- * Must be called BEFORE [Prozess.Consumer.start] so the subscription is active when the event fires.
+ * Registers assignment callbacks and returns a latch that counts down when each consumer
+ * receives [ConsumerEvent.Assigned]. Call this BEFORE [Prozess.Consumer.start], then
+ * call [Prozess.Consumer.start], then [awaitLatch] to block until all are assigned.
  */
-fun awaitAssignments(vararg consumers: Prozess.Consumer<*>, timeoutSeconds: Long = 30) {
+fun onAssigned(vararg consumers: Prozess.Consumer<*>): CountDownLatch {
     val latch = CountDownLatch(consumers.size)
     consumers.forEach { consumer ->
         consumer.onEvent { event ->
             if (event is ConsumerEvent.Assigned) latch.countDown()
         }
     }
+    return latch
+}
+
+/**
+ * Blocks until [latch] reaches zero. Use with [onAssigned].
+ */
+fun awaitLatch(latch: CountDownLatch, timeoutSeconds: Long = 30) {
     check(latch.await(timeoutSeconds, TimeUnit.SECONDS)) {
-        "Timed out waiting for partition assignments (${latch.count} consumers still unassigned)"
+        "Timed out waiting for latch (${latch.count} remaining)"
     }
 }
