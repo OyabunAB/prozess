@@ -395,12 +395,13 @@ class KafkaTests {
                 received.add(msg)
                 latch.countDown()
             }
+            val stopped = onStopped(consumer)
             consumer.start(from = StartOffset.Earliest, until = EndOffset.CatchUp)
             assertTrue(latch.await(5, TimeUnit.SECONDS), "timed out, got ${received.size}")
+            awaitLatch(stopped, timeoutSeconds = 5)
 
             // Publish more after catch-up — should not be received
             val afterMessages = publish(bootstrapServers, topicName, count = 5)
-            consumer.shutdown()
 
             assertEquals(published.sorted(), received.sorted().toList(), "Should receive exactly the original messages")
             val afterSet = afterMessages.toSet()
