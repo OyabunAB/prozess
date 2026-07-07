@@ -30,6 +30,16 @@ class StreamingConsumer<M : Any>(
 ) {
     private val log = Logging.logger { }
     private val instanceId = "[$instance ${config.topics} consumer]"
+    private val eventSink = Sinks.many().multicast().onBackpressureBuffer<ConsumerEvent>()
+    private val eventSubscriptions = java.util.concurrent.CopyOnWriteArrayList<reactor.core.Disposable>()
+
+    /** Reactive stream of consumer lifecycle events. Emits events from the point of subscription onward. */
+    val events: Flux<ConsumerEvent> = eventSink.asFlux()
+
+    /** Registers a callback for lifecycle events. Bound to this consumer's lifetime. */
+    fun onEvent(callback: (ConsumerEvent) -> Unit) {
+        eventSubscriptions.add(events.subscribe(callback))
+    }
 
     private val ends = AtomicReference<Positions>(emptySet())
     private val started = AtomicBoolean(false)
@@ -86,6 +96,7 @@ class StreamingConsumer<M : Any>(
         check(started.compareAndSet(false, true)) { "$instanceId start() called more than once" }
         poller.start()
         committer.start()
+        eventSink.tryEmitNext(ConsumerEvent.Started)
         val complete = completionSignal()
         val sync = syncSignal(until, complete)
         incomingFeed(sync, closeSignal.asMono(), from, until)
@@ -97,6 +108,10 @@ class StreamingConsumer<M : Any>(
 
     fun shutdown(duration: Duration? = null) {
         if (!disposed.compareAndSet(false, true)) return
+        eventSink.tryEmitNext(ConsumerEvent.Stopped)
+        eventSink.tryEmitComplete()
+        eventSubscriptions.forEach { it.dispose() }
+        eventSubscriptions.clear()
         ShutdownCoordinator(
             client = client,
             closeSignal = closeSignal,
@@ -112,11 +127,13 @@ class StreamingConsumer<M : Any>(
     fun pause() {
         paused.set(true)
         poller.pause()
+        eventSink.tryEmitNext(ConsumerEvent.Paused)
     }
 
     fun resume() {
         paused.set(false)
         poller.resume()
+        eventSink.tryEmitNext(ConsumerEvent.Resumed)
     }
 
     private fun incomingFeed(
@@ -131,10 +148,12 @@ class StreamingConsumer<M : Any>(
                 object : RebalanceListener {
                     override fun onPartitionsRevoked(context: RebalanceContext, partitions: Partitions) {
                         partitionManager.onPartitionsRevoked(context, partitions, committer.processedOffsets)
+                        eventSink.tryEmitNext(ConsumerEvent.Revoked(partitions))
                     }
                     override fun onPartitionsAssigned(context: RebalanceContext, partitions: Partitions) {
                         val seeds = partitionManager.onPartitionsAssigned(context, partitions)
                         if (seeds.isNotEmpty()) committer.seedOffsets(seeds)
+                        eventSink.tryEmitNext(ConsumerEvent.Assigned(partitions))
                     }
                 },
             )

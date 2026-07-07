@@ -22,6 +22,7 @@ data class ProducerConfig(
     val bufferMemory: Long = 32_000_000,
     val requestTimeout: Duration = 30.seconds,
     val enableIdempotence: Boolean = false,
+    val security: SecurityProtocol = SecurityProtocol.Plaintext,
 ) {
     enum class Acks(val value: String) {
         None("0"), Leader("1"), All("all")
@@ -42,7 +43,7 @@ data class ProducerConfig(
         ApacheProducerConfig.BUFFER_MEMORY_CONFIG to bufferMemory,
         ApacheProducerConfig.REQUEST_TIMEOUT_MS_CONFIG to requestTimeout.inWholeMilliseconds.toInt(),
         ApacheProducerConfig.ENABLE_IDEMPOTENCE_CONFIG to enableIdempotence,
-    )
+    ) + security.toProperties()
 }
 
 data class ConsumerConfig(
@@ -60,6 +61,7 @@ data class ConsumerConfig(
     val fetchMaxWait: Duration = 500.milliseconds,
     val maxPartitionFetchBytes: Int = 10_000_000,
     val isolationLevel: ConsumerConfig.IsolationLevel = ConsumerConfig.IsolationLevel.ReadUncommitted,
+    val security: SecurityProtocol = SecurityProtocol.Plaintext,
 ) {
     constructor(bootstrapServers: String, groupId: String, vararg topics: String) : this(
         bootstrapServers = bootstrapServers,
@@ -86,7 +88,7 @@ internal fun ConsumerConfig.toKafkaProperties(): Map<String, Any> = mapOf(
     ApacheConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG to fetchMaxWait.inWholeMilliseconds.toInt(),
     ApacheConsumerConfig.MAX_PARTITION_FETCH_BYTES_CONFIG to maxPartitionFetchBytes,
     ApacheConsumerConfig.ISOLATION_LEVEL_CONFIG to isolationLevel.value,
-)
+) + security.toProperties()
 
 private fun StartOffset.autoOffsetReset(): String = when (this) {
     is StartOffset.Earliest -> "earliest"
