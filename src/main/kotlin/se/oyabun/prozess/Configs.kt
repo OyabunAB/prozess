@@ -13,7 +13,11 @@ import kotlin.time.Duration.Companion.seconds
 
 sealed interface TransactionalConfig {
     data object None : TransactionalConfig
-    data class Enabled(val id: String) : TransactionalConfig
+    data class Enabled(val id: String) : TransactionalConfig {
+        init {
+            require(id.isNotBlank()) { "transactional.id must not be blank" }
+        }
+    }
 }
 
 data class ProducerConfig(
@@ -41,14 +45,15 @@ data class ProducerConfig(
         put(ApacheProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers)
         put(ApacheProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer::class.java.name)
         put(ApacheProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer::class.java.name)
-        put(ApacheProducerConfig.ACKS_CONFIG, if (transactional is TransactionalConfig.Enabled) Acks.All.value else acks.value)
+        val effectiveIdempotence = transactional is TransactionalConfig.Enabled || enableIdempotence
+        put(ApacheProducerConfig.ACKS_CONFIG, if (effectiveIdempotence) Acks.All.value else acks.value)
         put(ApacheProducerConfig.COMPRESSION_TYPE_CONFIG, compression.value)
         put(ApacheProducerConfig.LINGER_MS_CONFIG, linger.inWholeMilliseconds.toInt())
         put(ApacheProducerConfig.BATCH_SIZE_CONFIG, batchSize)
         put(ApacheProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, maxInFlight)
         put(ApacheProducerConfig.BUFFER_MEMORY_CONFIG, bufferMemory)
         put(ApacheProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, requestTimeout.inWholeMilliseconds.toInt())
-        put(ApacheProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, transactional is TransactionalConfig.Enabled || enableIdempotence)
+        put(ApacheProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, effectiveIdempotence)
         if (transactional is TransactionalConfig.Enabled) put(ApacheProducerConfig.TRANSACTIONAL_ID_CONFIG, transactional.id)
         putAll(security.toProperties())
     }

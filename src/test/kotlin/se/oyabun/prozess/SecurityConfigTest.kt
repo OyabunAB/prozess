@@ -255,6 +255,19 @@ class SecurityConfigTest {
     }
 
     @Test
+    fun `enableIdempotence without transactional forces acks all`() {
+        val config = ProducerConfig(
+            bootstrapServers = "localhost:9092",
+            topic = Topic("test"),
+            enableIdempotence = true,
+        )
+        val props = config.toKafkaProperties()
+
+        assertEquals(true, props["enable.idempotence"])
+        assertEquals("all", props["acks"])
+    }
+
+    @Test
     fun `default security is plaintext for producer`() {
         val config = ProducerConfig(
             bootstrapServers = "localhost:9092",
