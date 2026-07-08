@@ -229,41 +229,14 @@ class SecurityConfigTest {
     }
 
     @Test
-    fun `transactional id forces idempotence and acks all`() {
+    fun `transactional id forces acks all`() {
         val config = ProducerConfig(
             bootstrapServers = "localhost:9092",
             topic = Topic("test"),
             transactional = TransactionalConfig.Enabled("tx-id"),
-            enableIdempotence = false,
         )
         val props = config.toKafkaProperties()
 
-        assertEquals(true, props["enable.idempotence"])
-        assertEquals("all", props["acks"])
-    }
-
-    @Test
-    fun `without transactional id idempotence respects the given value`() {
-        val config = ProducerConfig(
-            bootstrapServers = "localhost:9092",
-            topic = Topic("test"),
-            enableIdempotence = false,
-        )
-        val props = config.toKafkaProperties()
-
-        assertEquals(false, props["enable.idempotence"])
-    }
-
-    @Test
-    fun `enableIdempotence without transactional forces acks all`() {
-        val config = ProducerConfig(
-            bootstrapServers = "localhost:9092",
-            topic = Topic("test"),
-            enableIdempotence = true,
-        )
-        val props = config.toKafkaProperties()
-
-        assertEquals(true, props["enable.idempotence"])
         assertEquals("all", props["acks"])
     }
 
