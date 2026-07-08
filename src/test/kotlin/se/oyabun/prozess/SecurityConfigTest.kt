@@ -206,6 +206,55 @@ class SecurityConfigTest {
     }
 
     @Test
+    fun `transactional id is absent by default`() {
+        val config = ProducerConfig(
+            bootstrapServers = "localhost:9092",
+            topic = Topic("test"),
+        )
+        val props = config.toKafkaProperties()
+
+        assertFalse(props.containsKey("transactional.id"))
+    }
+
+    @Test
+    fun `transactional id is included when set`() {
+        val config = ProducerConfig(
+            bootstrapServers = "localhost:9092",
+            topic = Topic("test"),
+            transactional = TransactionalConfig.Enabled("my-transactional-id"),
+        )
+        val props = config.toKafkaProperties()
+
+        assertEquals("my-transactional-id", props["transactional.id"])
+    }
+
+    @Test
+    fun `transactional id forces idempotence and acks all`() {
+        val config = ProducerConfig(
+            bootstrapServers = "localhost:9092",
+            topic = Topic("test"),
+            transactional = TransactionalConfig.Enabled("tx-id"),
+            enableIdempotence = false,
+        )
+        val props = config.toKafkaProperties()
+
+        assertEquals(true, props["enable.idempotence"])
+        assertEquals("all", props["acks"])
+    }
+
+    @Test
+    fun `without transactional id idempotence respects the given value`() {
+        val config = ProducerConfig(
+            bootstrapServers = "localhost:9092",
+            topic = Topic("test"),
+            enableIdempotence = false,
+        )
+        val props = config.toKafkaProperties()
+
+        assertEquals(false, props["enable.idempotence"])
+    }
+
+    @Test
     fun `default security is plaintext for producer`() {
         val config = ProducerConfig(
             bootstrapServers = "localhost:9092",

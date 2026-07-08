@@ -169,6 +169,92 @@ class KafkaTests {
         }
 
         @Test
+        fun `transactional commit is consumed with read committed isolation`() {
+            val topicName = topic(bootstrapServers)
+            val groupId = groupId()
+            val payload = "tx-committed"
+
+            val producer = Prozess.producer<String>(
+                ProducerConfig(
+                    bootstrapServers = bootstrapServers,
+                    topic = Topic(topicName),
+                    transactional = TransactionalConfig.Enabled("test-tx-${groupId}"),
+                ),
+                { it.toByteArray() },
+            )
+            producer.initTransactions()
+            producer.beginTransaction()
+            producer.send("k", payload)
+            producer.commitTransaction()
+            producer.close()
+
+            val received = mutableListOf<String>()
+            val latch = CountDownLatch(1)
+            val config = ConsumerConfig(
+                bootstrapServers = bootstrapServers,
+                groupId = groupId,
+                topics = setOf(topicName),
+                isolationLevel = ConsumerConfig.IsolationLevel.ReadCommitted,
+            )
+            val consumer = stringConsumer(config) { _, msg ->
+                received.add(msg)
+                latch.countDown()
+            }
+            consumer.start(from = StartOffset.Earliest)
+            assertTrue(latch.await(5, TimeUnit.SECONDS), "timed out waiting for committed message")
+            consumer.shutdown()
+
+            assertEquals(listOf(payload), received)
+        }
+
+        @Test
+        fun `transactional abort is not visible with read committed isolation`() {
+            val topicName = topic(bootstrapServers)
+            val groupId = groupId()
+            val committedPayload = "tx-committed"
+            val abortedPayload = "tx-aborted"
+
+            val producer = Prozess.producer<String>(
+                ProducerConfig(
+                    bootstrapServers = bootstrapServers,
+                    topic = Topic(topicName),
+                    transactional = TransactionalConfig.Enabled("test-tx-${groupId}"),
+                ),
+                { it.toByteArray() },
+            )
+            producer.initTransactions()
+
+            // Send and commit
+            producer.beginTransaction()
+            producer.send("k", committedPayload)
+            producer.commitTransaction()
+
+            // Send and abort
+            producer.beginTransaction()
+            producer.send("k", abortedPayload)
+            producer.abortTransaction()
+            producer.close()
+
+            val received = mutableListOf<String>()
+            val latch = CountDownLatch(1)
+            val config = ConsumerConfig(
+                bootstrapServers = bootstrapServers,
+                groupId = groupId,
+                topics = setOf(topicName),
+                isolationLevel = ConsumerConfig.IsolationLevel.ReadCommitted,
+            )
+            val consumer = stringConsumer(config) { _, msg ->
+                received.add(msg)
+                latch.countDown()
+            }
+            consumer.start(from = StartOffset.Earliest)
+            assertTrue(latch.await(5, TimeUnit.SECONDS), "timed out waiting for committed message")
+            consumer.shutdown()
+
+            assertEquals(listOf(committedPayload), received, "aborted message should not be visible")
+        }
+
+        @Test
         fun `send with headers and consume`() {
             val topicName = topic(bootstrapServers)
             val groupId = groupId()

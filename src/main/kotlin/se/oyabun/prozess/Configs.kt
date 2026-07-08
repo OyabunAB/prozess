@@ -11,6 +11,11 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 
+sealed interface TransactionalConfig {
+    data object None : TransactionalConfig
+    data class Enabled(val id: String) : TransactionalConfig
+}
+
 data class ProducerConfig(
     val bootstrapServers: String,
     val topic: Topic,
@@ -22,6 +27,7 @@ data class ProducerConfig(
     val bufferMemory: Long = 32_000_000,
     val requestTimeout: Duration = 30.seconds,
     val enableIdempotence: Boolean = false,
+    val transactional: TransactionalConfig = TransactionalConfig.None,
     val security: SecurityProtocol = SecurityProtocol.Plaintext,
 ) {
     enum class Acks(val value: String) {
@@ -31,19 +37,21 @@ data class ProducerConfig(
         None("none"), Gzip("gzip"), Snappy("snappy"), Lz4("lz4"), Zstd("zstd")
     }
 
-    internal fun toKafkaProperties(): Map<String, Any> = mapOf(
-        ApacheProducerConfig.BOOTSTRAP_SERVERS_CONFIG to bootstrapServers,
-        ApacheProducerConfig.KEY_SERIALIZER_CLASS_CONFIG to StringSerializer::class.java.name,
-        ApacheProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG to ByteArraySerializer::class.java.name,
-        ApacheProducerConfig.ACKS_CONFIG to acks.value,
-        ApacheProducerConfig.COMPRESSION_TYPE_CONFIG to compression.value,
-        ApacheProducerConfig.LINGER_MS_CONFIG to linger.inWholeMilliseconds.toInt(),
-        ApacheProducerConfig.BATCH_SIZE_CONFIG to batchSize,
-        ApacheProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION to maxInFlight,
-        ApacheProducerConfig.BUFFER_MEMORY_CONFIG to bufferMemory,
-        ApacheProducerConfig.REQUEST_TIMEOUT_MS_CONFIG to requestTimeout.inWholeMilliseconds.toInt(),
-        ApacheProducerConfig.ENABLE_IDEMPOTENCE_CONFIG to enableIdempotence,
-    ) + security.toProperties()
+    internal fun toKafkaProperties(): Map<String, Any> = buildMap {
+        put(ApacheProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers)
+        put(ApacheProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer::class.java.name)
+        put(ApacheProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer::class.java.name)
+        put(ApacheProducerConfig.ACKS_CONFIG, if (transactional is TransactionalConfig.Enabled) Acks.All.value else acks.value)
+        put(ApacheProducerConfig.COMPRESSION_TYPE_CONFIG, compression.value)
+        put(ApacheProducerConfig.LINGER_MS_CONFIG, linger.inWholeMilliseconds.toInt())
+        put(ApacheProducerConfig.BATCH_SIZE_CONFIG, batchSize)
+        put(ApacheProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, maxInFlight)
+        put(ApacheProducerConfig.BUFFER_MEMORY_CONFIG, bufferMemory)
+        put(ApacheProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, requestTimeout.inWholeMilliseconds.toInt())
+        put(ApacheProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, transactional is TransactionalConfig.Enabled || enableIdempotence)
+        if (transactional is TransactionalConfig.Enabled) put(ApacheProducerConfig.TRANSACTIONAL_ID_CONFIG, transactional.id)
+        putAll(security.toProperties())
+    }
 }
 
 data class ConsumerConfig(
