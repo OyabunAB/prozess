@@ -11,17 +11,25 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 
+sealed interface TransactionalConfig {
+    data class Disabled(val acks: ProducerConfig.Acks = ProducerConfig.Acks.Leader) : TransactionalConfig
+    data class Enabled(val id: String) : TransactionalConfig {
+        init {
+            require(id.isNotBlank()) { "transactional.id must not be blank" }
+        }
+    }
+}
+
 data class ProducerConfig(
     val bootstrapServers: String,
     val topic: Topic,
-    val acks: ProducerConfig.Acks = ProducerConfig.Acks.Leader,
     val compression: ProducerConfig.Compression = ProducerConfig.Compression.None,
     val linger: Duration = Duration.ZERO,
     val batchSize: Int = 16384,
     val maxInFlight: Int = 5,
     val bufferMemory: Long = 32_000_000,
     val requestTimeout: Duration = 30.seconds,
-    val enableIdempotence: Boolean = false,
+    val transactional: TransactionalConfig = TransactionalConfig.Disabled(),
     val security: SecurityProtocol = SecurityProtocol.Plaintext,
 ) {
     enum class Acks(val value: String) {
@@ -31,19 +39,25 @@ data class ProducerConfig(
         None("none"), Gzip("gzip"), Snappy("snappy"), Lz4("lz4"), Zstd("zstd")
     }
 
-    internal fun toKafkaProperties(): Map<String, Any> = mapOf(
-        ApacheProducerConfig.BOOTSTRAP_SERVERS_CONFIG to bootstrapServers,
-        ApacheProducerConfig.KEY_SERIALIZER_CLASS_CONFIG to StringSerializer::class.java.name,
-        ApacheProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG to ByteArraySerializer::class.java.name,
-        ApacheProducerConfig.ACKS_CONFIG to acks.value,
-        ApacheProducerConfig.COMPRESSION_TYPE_CONFIG to compression.value,
-        ApacheProducerConfig.LINGER_MS_CONFIG to linger.inWholeMilliseconds.toInt(),
-        ApacheProducerConfig.BATCH_SIZE_CONFIG to batchSize,
-        ApacheProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION to maxInFlight,
-        ApacheProducerConfig.BUFFER_MEMORY_CONFIG to bufferMemory,
-        ApacheProducerConfig.REQUEST_TIMEOUT_MS_CONFIG to requestTimeout.inWholeMilliseconds.toInt(),
-        ApacheProducerConfig.ENABLE_IDEMPOTENCE_CONFIG to enableIdempotence,
-    ) + security.toProperties()
+    internal fun toKafkaProperties(): Map<String, Any> = buildMap {
+        put(ApacheProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers)
+        put(ApacheProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer::class.java.name)
+        put(ApacheProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer::class.java.name)
+        when (transactional) {
+            is TransactionalConfig.Disabled -> put(ApacheProducerConfig.ACKS_CONFIG, transactional.acks.value)
+            is TransactionalConfig.Enabled -> {
+                put(ApacheProducerConfig.ACKS_CONFIG, Acks.All.value)
+                put(ApacheProducerConfig.TRANSACTIONAL_ID_CONFIG, transactional.id)
+            }
+        }
+        put(ApacheProducerConfig.COMPRESSION_TYPE_CONFIG, compression.value)
+        put(ApacheProducerConfig.LINGER_MS_CONFIG, linger.inWholeMilliseconds.toInt())
+        put(ApacheProducerConfig.BATCH_SIZE_CONFIG, batchSize)
+        put(ApacheProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, maxInFlight)
+        put(ApacheProducerConfig.BUFFER_MEMORY_CONFIG, bufferMemory)
+        put(ApacheProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, requestTimeout.inWholeMilliseconds.toInt())
+        putAll(security.toProperties())
+    }
 }
 
 data class ConsumerConfig(

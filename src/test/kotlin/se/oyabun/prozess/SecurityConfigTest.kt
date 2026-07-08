@@ -206,6 +206,41 @@ class SecurityConfigTest {
     }
 
     @Test
+    fun `transactional id is absent by default`() {
+        val config = ProducerConfig(
+            bootstrapServers = "localhost:9092",
+            topic = Topic("test"),
+        )
+        val props = config.toKafkaProperties()
+
+        assertFalse(props.containsKey("transactional.id"))
+    }
+
+    @Test
+    fun `transactional id is included when set`() {
+        val config = ProducerConfig(
+            bootstrapServers = "localhost:9092",
+            topic = Topic("test"),
+            transactional = TransactionalConfig.Enabled("my-transactional-id"),
+        )
+        val props = config.toKafkaProperties()
+
+        assertEquals("my-transactional-id", props["transactional.id"])
+    }
+
+    @Test
+    fun `transactional id forces acks all`() {
+        val config = ProducerConfig(
+            bootstrapServers = "localhost:9092",
+            topic = Topic("test"),
+            transactional = TransactionalConfig.Enabled("tx-id"),
+        )
+        val props = config.toKafkaProperties()
+
+        assertEquals("all", props["acks"])
+    }
+
+    @Test
     fun `default security is plaintext for producer`() {
         val config = ProducerConfig(
             bootstrapServers = "localhost:9092",
