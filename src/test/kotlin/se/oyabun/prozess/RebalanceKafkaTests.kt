@@ -33,7 +33,6 @@ class RebalanceKafkaTests {
             val topicName = topic(bootstrapServers, partitions = 2)
             val groupId = groupId()
             val count = 20
-            val published = publish(bootstrapServers, topicName, count = count)
 
             val messagesA = ConcurrentLinkedQueue<String>()
             val messagesB = ConcurrentLinkedQueue<String>()
@@ -53,8 +52,12 @@ class RebalanceKafkaTests {
                 allDone.countDown()
             }
 
+            val assigned = onAssigned(consumerA, consumerB)
             consumerA.start(from = StartOffset.Earliest)
             consumerB.start(from = StartOffset.Earliest)
+            awaitLatch(assigned)
+
+            val published = publish(bootstrapServers, topicName, count = count)
 
             assertTrue(
                 allDone.await(30, TimeUnit.SECONDS),
@@ -65,7 +68,7 @@ class RebalanceKafkaTests {
             consumerB.shutdown()
 
             val allConsumed = messagesA + messagesB
-            assertEquals(published.sorted(), allConsumed.sorted(), "All messages must be consumed at least once")
+            assertEquals(published.sorted(), allConsumed.sorted(), "All messages must be consumed exactly once")
 
             for (msg in messagesA) {
                 assertTrue(msg !in messagesB, "Message $msg was processed by both consumers (duplication)")

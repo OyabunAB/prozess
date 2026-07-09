@@ -1,75 +1,60 @@
 package se.oyabun.prozess
 
-import reactor.core.publisher.Flux
-import reactor.core.publisher.FluxSink
-import se.oyabun.prozess.Received
-import java.util.Queue
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.flow
+import se.oyabun.aelv.Many
+import se.oyabun.aelv.asMany
+import se.oyabun.aelv.doOnNext
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicReference
 
-/**
- * Abstraction for a buffer that holds [Received] records.
- *
- * Records are written via [offer] and read reactively via [asFlux].
- * The buffer owns the back-pressure contract via high/low watermarks,
- * calling [onPause] when the buffer fills past [highWaterMark] and
- * [onResume] when it drains below [lowWaterMark].
- */
 interface ReceivedBuffer {
-
-    fun offer(received: Received): Boolean
+    suspend fun offer(received: Received)
     val size: Int
-    fun asFlux(): Flux<Received>
+    fun asMany(): Many<Received>
 }
 
 internal class InMemoryReceivedBuffer(
-    private val delegate: Queue<Received> = ConcurrentLinkedQueue(),
     private val highWaterMark: Int = Int.MAX_VALUE,
     private val lowWaterMark: Int = 0,
     private val onPause: () -> Unit = {},
     private val onResume: () -> Unit = {},
 ) : ReceivedBuffer {
 
-    private val sink = AtomicReference<FluxSink<Received>>()
-    @Volatile
-    private var paused = false
-    private val count = AtomicInteger(0)
+    private val queue   = ConcurrentLinkedQueue<Received>()
+    private val count   = AtomicInteger(0)
+    // Signal channel: capacity 1, offers are dropped if a signal is already pending.
+    // Used only to wake a suspended collector; data lives in queue.
+    private val signal  = Channel<Unit>(1)
+    @Volatile private var paused = false
 
-    override fun offer(received: Received): Boolean {
-        val result = delegate.add(received)
+    override suspend fun offer(received: Received) {
+        queue.add(received)
         val n = count.incrementAndGet()
         if (!paused && n >= highWaterMark) {
             paused = true
             onPause()
         }
-        sink.get()?.let { drain(it) }
-        return result
+        signal.trySend(Unit) // best-effort wakeup; collector loops anyway
     }
 
     override val size: Int get() = count.get()
 
-    override fun asFlux(): Flux<Received> = Flux.create(
-        { s ->
-            sink.set(s)
-            s.onDispose { sink.compareAndSet(s, null) }
-            drain(s)
-        },
-        FluxSink.OverflowStrategy.IGNORE,
-    )
-
-    /**
-     * Drains all queued records into the sink while downstream has demand.
-     */
-    private fun drain(s: FluxSink<Received>) {
-        while (s.requestedFromDownstream() > 0) {
-            val record = delegate.poll() ?: break
-            s.next(record)
-            val n = count.decrementAndGet()
-            if (paused && n < lowWaterMark) {
-                paused = false
-                onResume()
+    override fun asMany(): Many<Received> = flow<Received> {
+        while (true) {
+            // Drain everything currently in the queue
+            while (true) {
+                val record = queue.poll() ?: break
+                emit(record)
             }
+            // Wait for next offer() to signal more data
+            signal.receive()
+        }
+    }.asMany().doOnNext { _: Received ->
+        val n = count.decrementAndGet()
+        if (paused && n < lowWaterMark) {
+            paused = false
+            onResume()
         }
     }
 }

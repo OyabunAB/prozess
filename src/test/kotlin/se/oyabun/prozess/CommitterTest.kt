@@ -1,20 +1,18 @@
 package se.oyabun.prozess
 
+import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.assertThrows
-import reactor.test.StepVerifier
-import se.oyabun.prozess.Logging
-import se.oyabun.prozess.Offsets
-import se.oyabun.prozess.Partition
-import se.oyabun.prozess.Position
-import se.oyabun.prozess.Topic
+import se.oyabun.aelv.Verify
+import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
-import kotlin.time.toJavaDuration
 
+@Timeout(value = 5, unit = TimeUnit.SECONDS)
 class CommitterTest {
 
     private val topic = Topic("test")
@@ -24,17 +22,17 @@ class CommitterTest {
     @Test
     fun `markProcessed updates processedOffsets`() {
         val c = committer()
-        c.markProcessed(Position(p0, 5L)).block()
+        runBlocking { c.markProcessed(Position(p0, 5L)) }
         assertEquals(mapOf(p0 to 6L), c.processedOffsets)
-        c.markProcessed(Position(p1, 10L)).block()
+        runBlocking { c.markProcessed(Position(p1, 10L)) }
         assertEquals(mapOf(p0 to 6L, p1 to 11L), c.processedOffsets)
     }
 
     @Test
     fun `markProcessed tracks highest offset per partition`() {
         val c = committer()
-        c.markProcessed(Position(p0, 5L)).block()
-        c.markProcessed(Position(p0, 3L)).block()
+        runBlocking { c.markProcessed(Position(p0, 5L)) }
+        runBlocking { c.markProcessed(Position(p0, 3L)) }
         assertEquals(mapOf(p0 to 6L), c.processedOffsets)
     }
 
@@ -57,13 +55,15 @@ class CommitterTest {
             log = Logging.logger { },
             bufferSize = 500,
             maxBatchSize = 3,
-            maxBatchTime = 5.seconds.toJavaDuration(),
+            maxBatchTime = 5.seconds,
         )
         c.start()
-        c.markProcessed(Position(p0, 1L)).block()
-        c.markProcessed(Position(p0, 2L)).block()
-        c.markProcessed(Position(p0, 3L)).block()
-        c.stop().block()
+        runBlocking {
+            c.markProcessed(Position(p0, 1L))
+            c.markProcessed(Position(p0, 2L))
+            c.markProcessed(Position(p0, 3L))
+            c.stop().await()
+        }
         assertFalse(fake.commits.isEmpty(), "Expected at least one commit")
         assertEquals(mapOf(p0 to 4L), fake.commits.peek().first)
     }
@@ -78,11 +78,13 @@ class CommitterTest {
             log = Logging.logger { },
             bufferSize = 500,
             maxBatchSize = 100,
-            maxBatchTime = 200.milliseconds.toJavaDuration(),
+            maxBatchTime = 200.milliseconds,
         )
         c.start()
-        c.markProcessed(Position(p0, 1L)).block()
-        c.stop().block()
+        runBlocking {
+            c.markProcessed(Position(p0, 1L))
+            c.stop().await()
+        }
         assertFalse(fake.commits.isEmpty(), "Expected at least one commit")
         assertEquals(mapOf(p0 to 2L), fake.commits.peek().first)
     }
@@ -97,12 +99,14 @@ class CommitterTest {
             log = Logging.logger { },
             bufferSize = 500,
             maxBatchSize = 2,
-            maxBatchTime = 5.seconds.toJavaDuration(),
+            maxBatchTime = 5.seconds,
         )
         c.start()
-        c.markProcessed(Position(p1, 1L)).block()
-        c.markProcessed(Position(p0, 1L)).block()
-        c.stop().block()
+        runBlocking {
+            c.markProcessed(Position(p1, 1L))
+            c.markProcessed(Position(p0, 1L))
+            c.stop().await()
+        }
         assertFalse(fake.commits.isEmpty(), "Expected at least one commit")
         assertEquals(mapOf(p0 to 2L), fake.commits.peek().first)
     }
@@ -119,11 +123,13 @@ class CommitterTest {
             log = Logging.logger { },
             bufferSize = 500,
             maxBatchSize = 1,
-            maxBatchTime = 5.seconds.toJavaDuration(),
+            maxBatchTime = 5.seconds,
         )
         c.start()
-        c.markProcessed(Position(p0, 1L)).block()
-        c.stop().block()
+        runBlocking {
+            c.markProcessed(Position(p0, 1L))
+            c.stop().await()
+        }
         assertFalse(fake.commits.isEmpty(), "Expected retry to recover")
         assertEquals(mapOf(p0 to 2L), fake.commits.peek().first)
     }
@@ -138,12 +144,14 @@ class CommitterTest {
             log = Logging.logger { },
             bufferSize = 500,
             maxBatchSize = 100,
-            maxBatchTime = 5.seconds.toJavaDuration(),
+            maxBatchTime = 5.seconds,
         )
         c.start()
         c.seedOffsets(mapOf(p1 to 50L))
-        c.markProcessed(Position(p0, 1L)).block()
-        c.stop().block()
+        runBlocking {
+            c.markProcessed(Position(p0, 1L))
+            c.stop().await()
+        }
         assertFalse(fake.commits.isEmpty(), "Expected commit after stop")
         assertEquals(mapOf(p0 to 2L), fake.commits.peek().first)
     }
@@ -151,13 +159,13 @@ class CommitterTest {
     @Test
     fun `positions flux emits marked positions`() {
         val c = committer()
-        val verifier = StepVerifier.create(c.positions)
-            .expectSubscription()
-            .then { c.markProcessed(Position(p0, 5L)).block() }
-            .expectNext(Position(p0, 5L))
-            .then { c.markProcessed(Position(p1, 10L)).block() }
-            .expectNext(Position(p1, 10L))
-            .thenCancel()
+        Verify.that(c.positions)
+            .isSubscribed()
+            .runs { runBlocking { c.markProcessed(Position(p0, 5L)) } }
+            .emitsNext(Position(p0, 5L))
+            .runs { runBlocking { c.markProcessed(Position(p1, 10L)) } }
+            .emitsNext(Position(p1, 10L))
+            .thenCancels()
             .verify()
     }
 
@@ -171,12 +179,14 @@ class CommitterTest {
             log = Logging.logger { },
             bufferSize = 500,
             maxBatchSize = 100,
-            maxBatchTime = 5.seconds.toJavaDuration(),
+            maxBatchTime = 5.seconds,
         )
         c.start()
-        c.markProcessed(Position(p0, 1L)).block()
-        c.markProcessed(Position(p0, 2L)).block()
-        c.stop().block()
+        runBlocking {
+            c.markProcessed(Position(p0, 1L))
+            c.markProcessed(Position(p0, 2L))
+            c.stop().await()
+        }
         assertFalse(fake.commits.isEmpty(), "Expected commit after stop")
         assertEquals(mapOf(p0 to 3L), fake.commits.peek().first)
     }
@@ -191,9 +201,11 @@ class CommitterTest {
             log = Logging.logger { },
         )
         c.start()
-        c.markProcessed(Position(p0, 1L)).block()
-        c.stop().block()
-        c.stop().block()
+        runBlocking {
+            c.markProcessed(Position(p0, 1L))
+            c.stop().await()
+            c.stop().await()
+        }
     }
 
     @Test
@@ -206,11 +218,13 @@ class CommitterTest {
             log = Logging.logger { },
             bufferSize = 500,
             maxBatchSize = 3,
-            maxBatchTime = 5.seconds.toJavaDuration(),
+            maxBatchTime = 5.seconds,
         )
         c.start()
-        (1..9).forEach { c.markProcessed(Position(p0, it.toLong())).block() }
-        c.stop().block()
+        runBlocking {
+            (1..9).forEach { c.markProcessed(Position(p0, it.toLong())) }
+            c.stop().await()
+        }
         val committed = fake.commits.mapNotNull { it.first[p0] }.sorted()
         assertEquals(listOf(4L, 7L, 10L), committed, "Expected per-batch high-water offsets")
     }
@@ -225,12 +239,14 @@ class CommitterTest {
             log = Logging.logger { },
             bufferSize = 500,
             maxBatchSize = 100,
-            maxBatchTime = 5.seconds.toJavaDuration(),
+            maxBatchTime = 5.seconds,
         )
         c.start()
-        c.markProcessed(Position(p0, 1L)).block()
-        c.stop().block()
-        c.stop().block()
+        runBlocking {
+            c.markProcessed(Position(p0, 1L))
+            c.stop().await()
+            c.stop().await()
+        }
         assertFalse(fake.commits.isEmpty(), "Expected commit from first stop")
     }
 
@@ -247,12 +263,12 @@ class CommitterTest {
         c.seedOffsets(mapOf(p0 to 42L))
         assertEquals(mapOf(p0 to 42L), c.processedOffsets)
 
-        c.markProcessed(Position(p0, 50L)).block()
+        runBlocking { c.markProcessed(Position(p0, 50L)) }
         assertEquals(mapOf(p0 to 51L), c.processedOffsets)
 
         c.start()
         assertEquals(mapOf(p0 to 51L), c.processedOffsets)
-        c.stop().block()
+        runBlocking { c.stop().await() }
         assertEquals(mapOf(p0 to 51L), c.processedOffsets)
     }
 
@@ -263,7 +279,7 @@ class CommitterTest {
         try {
             assertThrows<CommitterAlreadyRunning> { c.start() }
         } finally {
-            c.stop().block()
+            runBlocking { c.stop().await() }
         }
     }
 

@@ -1,5 +1,6 @@
 package se.oyabun.prozess
 
+import kotlinx.coroutines.runBlocking
 import org.apache.kafka.clients.admin.AdminClient
 import org.apache.kafka.clients.admin.AdminClientConfig
 import org.apache.kafka.clients.admin.NewTopic
@@ -12,6 +13,7 @@ import org.junit.jupiter.api.TestInstance.Lifecycle
 import org.junit.jupiter.api.Timeout
 import org.testcontainers.kafka.KafkaContainer
 import org.testcontainers.utility.MountableFile
+import se.oyabun.aelv.get
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -170,8 +172,8 @@ class SecurityIntegrationTest {
             security = security,
         )
         val producer = StreamingProducer<String>(producerConfig) { it.toByteArray() }
-        producer.send("key", message).block()
-        producer.close().block()
+        runBlocking { producer.send("key", message).get() }
+        runBlocking { producer.close().await() }
 
         // Consume
         val received = mutableListOf<String>()

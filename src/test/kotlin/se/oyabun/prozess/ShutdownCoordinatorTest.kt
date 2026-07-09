@@ -1,10 +1,10 @@
 package se.oyabun.prozess
 
 import org.junit.jupiter.api.Test
-import reactor.core.Disposable
-import reactor.core.publisher.Flux
-import reactor.core.publisher.Mono
-import reactor.core.publisher.Sinks
+import org.junit.jupiter.api.Timeout
+import se.oyabun.aelv.Many
+import se.oyabun.aelv.None
+import se.oyabun.aelv.Sink
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -14,6 +14,7 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
+@Timeout(value = 5, unit = TimeUnit.SECONDS)
 class ShutdownCoordinatorTest {
 
     private val log = Logging.logger { }
@@ -24,7 +25,7 @@ class ShutdownCoordinatorTest {
         val coordinator = ShutdownCoordinator(
             client = testClient(
                 onWakeup = { order.add("wakeup") },
-                onClose = { order.add("close"); Mono.empty() },
+                onClose = { order.add("close"); None.complete() },
             ),
             closeSignal = closeSignal(),
             poller = testPoller { order.add("poller") },
@@ -53,12 +54,13 @@ class ShutdownCoordinatorTest {
     }
 
     @Test
+    @Timeout(value = 5, unit = TimeUnit.SECONDS)
     fun `shutdown with duration force closes when components hang`() {
         val order = mutableListOf<String>()
         val poller = object : Poller {
             private val stopped = AtomicBoolean(false)
             override fun start() = error("unexpected")
-            override fun stop(): Mono<Void> = if (!stopped.getAndSet(true)) Mono.never() else Mono.empty()
+            override fun stop(): None<Unit> = if (!stopped.getAndSet(true)) None.never() else None.complete()
             override fun pause() = error("unexpected")
             override fun resume() = error("unexpected")
             override val isRunning: Boolean get() = !stopped.get()
@@ -66,7 +68,7 @@ class ShutdownCoordinatorTest {
         val coordinator = ShutdownCoordinator(
             client = testClient(
                 onWakeup = { order.add("wakeup") },
-                onClose = { order.add("close"); Mono.empty() },
+                onClose = { order.add("close"); None.complete() },
             ),
             closeSignal = closeSignal(),
             poller = poller,
@@ -85,7 +87,7 @@ class ShutdownCoordinatorTest {
         val completed = AtomicBoolean(false)
         val latch = CountDownLatch(1)
         val coordinator = ShutdownCoordinator(
-            client = testClient(onClose = { completed.set(true); Mono.empty() }),
+            client = testClient(onClose = { completed.set(true); None.complete() }),
             closeSignal = closeSignal(),
             poller = testPoller { latch.countDown() },
             committer = testCommitter { },
@@ -107,7 +109,7 @@ class ShutdownCoordinatorTest {
         val coordinator = ShutdownCoordinator(
             client = testClient(
                 onWakeup = { order.add("wakeup") },
-                onClose = { order.add("close"); Mono.empty() },
+                onClose = { order.add("close"); None.complete() },
             ),
             closeSignal = closeSignal(),
             poller = testPoller { order.add("poller") },
@@ -124,19 +126,19 @@ class ShutdownCoordinatorTest {
 
     private fun testClient(
         onWakeup: () -> Unit = {},
-        onClose: () -> Mono<Void> = { Mono.empty() },
+        onClose: () -> None<Unit> = { None.complete() },
     ) = object : ShutdownableClient {
         override fun wakeup() = onWakeup()
         override fun close(timeout: Duration) = onClose()
     }
 
-    private fun closeSignal(): Sinks.One<Unit> = Sinks.one()
+    private fun closeSignal(): Sink<Unit> = Sink.broadcast()
 
     companion object {
         fun testPoller(onStop: () -> Unit = {}): Poller = object : Poller {
             private val stopped = AtomicBoolean(false)
             override fun start() = error("unexpected")
-            override fun stop(): Mono<Void> = Mono.fromRunnable {
+            override fun stop(): None<Unit> = None.defer {
                 if (!stopped.getAndSet(true)) onStop()
             }
             override fun pause() = error("unexpected")
@@ -145,12 +147,12 @@ class ShutdownCoordinatorTest {
         }
 
         fun testCommitter(onStop: () -> Unit = {}): Committer = object : Committer {
-            override fun markProcessed(position: Position): Mono<Position> = error("unexpected")
+            override suspend fun markProcessed(position: Position) = error("unexpected")
             override fun seedOffsets(offsets: Offsets) = error("unexpected")
-            override val positions: Flux<Position> get() = error("unexpected")
+            override val positions: Many<Position> get() = error("unexpected")
             override val processedOffsets: Offsets get() = error("unexpected")
             override fun start() = error("unexpected")
-            override fun stop(): Mono<Void> = Mono.fromRunnable { onStop() }
+            override fun stop(): None<Unit> = None.defer { onStop() }
         }
     }
 }

@@ -1,127 +1,87 @@
 package se.oyabun.prozess
 
-import org.reactivestreams.Publisher
-import reactor.core.publisher.Flux
-import reactor.core.publisher.GroupedFlux
-import reactor.core.publisher.Mono
-import reactor.core.publisher.Mono.fromCallable
-import reactor.core.publisher.Mono.just
-import reactor.util.retry.Retry
-import reactor.util.retry.RetryBackoffSpec
+import se.oyabun.aelv.Many
+import se.oyabun.aelv.One
+import se.oyabun.aelv.Policy
+import se.oyabun.aelv.asMany
+import se.oyabun.aelv.bufferTimeout
+import se.oyabun.aelv.concatMap
+import se.oyabun.aelv.filter
+import se.oyabun.aelv.flatMap
+import se.oyabun.aelv.flatMapMany
+import se.oyabun.aelv.flatMapSequential
+import se.oyabun.aelv.groupBy
+import se.oyabun.aelv.map
+import se.oyabun.aelv.mapNotNull
+import se.oyabun.aelv.retry
+import se.oyabun.aelv.toList
 import se.oyabun.prozess.Prozess.DeserializationResult
 import se.oyabun.prozess.Prozess.Deserializer
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
-import kotlin.time.toJavaDuration
+import kotlin.time.Duration.Companion.milliseconds
 
-/** A deserialized message with its raw Kafka metadata. */
 data class Processable<M>(
     val received: Received,
     val value: M,
 )
 
-/** Backoff policy for retrying failed message processing. */
 data class RetryConfig(
     val minBackoff: Duration = 1.seconds,
     val maxBackoff: Duration = 30.seconds,
 )
 
-/** Processing pipeline for a single Kafka partition. */
 interface Processor<M : Any> {
-    fun process(partition: Flux<Received>): Flux<Position>
+    fun process(partition: Many<Received>): Many<Position>
 }
 
 internal class ContiguousOffsetTracker {
-    private val completed = mutableSetOf<Long>()
-    private var watermark = 0L
+    private val completed = java.util.concurrent.ConcurrentSkipListSet<Long>()
+    @Volatile private var watermark = 0L
 
+    @Synchronized
     fun onCompleted(position: Position): Position? {
         val offset = position.offset
         if (offset < watermark) return null
-
         completed.add(offset)
-
         var advanced = false
-        while (completed.remove(watermark)) {
-            watermark++
-            advanced = true
-        }
-
+        while (completed.remove(watermark)) { watermark++; advanced = true }
         return if (advanced) Position(position.partition, watermark - 1) else null
     }
 }
 
-private fun <T : Any, V : Any> Flux<T>.flatMapSequential(maxConcurrency: Int, mapper: (T) -> Publisher<V>): Flux<V> =
-    flatMapSequential(mapper, maxConcurrency)
-
-private fun <T : Any, V : Any> Flux<T>.flatMap(concurrency: Int, mapper: (T) -> Publisher<V>): Flux<V> =
-    flatMap(mapper, concurrency)
-
-/**
- * Default [Processor] that deserializes messages, invokes a user handler,
- * and retries failures indefinitely with exponential backoff.
- *
- * Use the companion factory methods to create instances:
- * - [each] — process messages one at a time
- * - [batch] — process messages in atomic batches
- * - [groupedEach] — process each key group sequentially, groups concurrently
- * - [groupedBatch] — process key-grouped batches atomically
- */
 class DefaultProcessor<M : Any> private constructor(
-    private val pipeline: (Flux<Received>) -> Flux<Position>,
+    private val pipeline: (Many<Received>) -> Many<Position>,
 ) : Processor<M> {
 
-    override fun process(partition: Flux<Received>): Flux<Position> = pipeline(partition)
+    override fun process(partition: Many<Received>): Many<Position> = pipeline(partition)
 
     companion object {
-        private fun retrySpec(retryConfig: RetryConfig, label: String): reactor.util.retry.RetryBackoffSpec {
-            val log = Logging.logger { }
-            return Retry.backoff(Long.MAX_VALUE, retryConfig.minBackoff.toJavaDuration())
-                .maxBackoff(retryConfig.maxBackoff.toJavaDuration())
-                .doBeforeRetry { signal ->
-                    log.retry.retrying(label, "", signal.totalRetries(), signal.failure())
-                }
-        }
 
-        /** Processes each message individually. Messages within a partition preserve Kafka offset order. */
+        private fun retryPolicy(retryConfig: RetryConfig): Policy.Retry =
+            Policy.retry().withBackoff(retryConfig.minBackoff, retryConfig.maxBackoff).on { true }
+
         fun <M : Any> each(
             deserializer: Deserializer<M>,
             handler: (Processable<M>) -> Unit,
             retryConfig: RetryConfig = RetryConfig(),
             maxConcurrency: Int = 1,
         ): DefaultProcessor<M> {
-            val spec = retrySpec(retryConfig, "process")
-            val log = Logging.logger { }
-            fun processOne(received: Received): Mono<Position> =
-                fromCallable {
-                    when (val result = deserializer(received)) {
-                        is DeserializationResult.Message -> {
-                            handler(Processable(received, result.value))
-                            received.position
-                        }
-                        is DeserializationResult.Tombstone -> {
-                            log.processing.tombstone(received.position)
-                            received.position
-                        }
-                        is DeserializationResult.PoisonPill -> {
-                            log.processing.poisonPill(received.position, result.reason)
-                            received.position
-                        }
-                    }
+            val policy = retryPolicy(retryConfig)
+            val log    = Logging.logger { }
+            fun processOne(received: Received): One<Position> = One.defer {
+                when (val result = deserializer(received)) {
+                    is DeserializationResult.Message    -> { handler(Processable(received, result.value)); received.position }
+                    is DeserializationResult.Tombstone  -> { log.processing.tombstone(received.position); received.position }
+                    is DeserializationResult.PoisonPill -> { log.processing.poisonPill(received.position, result.reason); received.position }
                 }
-                .retryWhen(spec)
+            }.retry(policy)
 
             return DefaultProcessor { partition ->
-                partition.flatMapSequential(maxConcurrency) { received ->
-                    processOne(received)
-                }
+                partition.flatMapSequential(maxConcurrency) { received: Received -> processOne(received).asMany() }
             }
         }
 
-        /**
-         * Buffers messages into atomic batches of [batchSize] or [batchDuration] timeout,
-         * then processes each batch atomically — all succeed or the entire batch is retried.
-         */
         fun <M : Any> batch(
             deserializer: Deserializer<M>,
             handler: (List<Processable<M>>) -> Unit,
@@ -130,53 +90,37 @@ class DefaultProcessor<M : Any> private constructor(
             retryConfig: RetryConfig = RetryConfig(),
             maxConcurrency: Int = 1,
         ): DefaultProcessor<M> {
-            val spec = retrySpec(retryConfig, "batch")
-            val log = Logging.logger { }
+            val policy = retryPolicy(retryConfig)
+            val log    = Logging.logger { }
 
-            fun processBatch(messages: List<Received>): Flux<Position> =
-                Flux.fromIterable(messages)
-                    .flatMap { received ->
-                        fromCallable {
+            fun processBatch(messages: List<Received>): Many<Position> =
+                Many.of(messages)
+                    .flatMap { received: Received ->
+                        One.defer {
                             when (val result = deserializer(received)) {
-                                is DeserializationResult.Message ->
-                                    BatchItem(Processable(received, result.value))
-                                is DeserializationResult.Tombstone -> {
-                                    log.processing.tombstone(received.position)
-                                    BatchItem(ack = received.position)
-                                }
-                                is DeserializationResult.PoisonPill -> {
-                                    log.processing.poisonPill(received.position, result.reason)
-                                    BatchItem(ack = received.position)
-                                }
+                                is DeserializationResult.Message    -> BatchItem<M>(Processable(received, result.value))
+                                is DeserializationResult.Tombstone  -> { log.processing.tombstone(received.position); BatchItem(ack = received.position) }
+                                is DeserializationResult.PoisonPill -> { log.processing.poisonPill(received.position, result.reason); BatchItem(ack = received.position) }
                             }
-                        }
-                        .retryWhen(spec)
+                        }.retry(policy).asMany()
                     }
-                    .collectList()
-                    .flatMapMany { items ->
+                    .toList()
+                    .flatMapMany { items: List<BatchItem<M>> ->
                         val processables: List<Processable<M>> = items.mapNotNull { it.processable }
-                        val acks = items.mapNotNull { it.ack }
-                        if (processables.isEmpty()) Flux.fromIterable(acks)
-                        else fromCallable {
+                        val acks: List<Position>               = items.mapNotNull { it.ack }
+                        if (processables.isEmpty()) return@flatMapMany Many.of(acks)
+                        One.defer {
                             handler(processables)
                             processables.map { it.received.position } + acks
-                        }.flatMapMany { Flux.fromIterable(it.sortedBy { it.offset }) }
-                            .retryWhen(spec)
+                        }.retry(policy).flatMapMany { positions: List<Position> -> Many.of(positions.sortedBy { p -> p.offset }) }
                     }
 
             return DefaultProcessor { partition ->
-                partition.bufferTimeout(batchSize, batchDuration.toJavaDuration())
-                    .flatMapSequential(maxConcurrency) { messages ->
-                        processBatch(messages)
-                    }
+                partition.bufferTimeout(batchSize, batchDuration)
+                    .flatMapSequential(maxConcurrency) { messages: List<Received> -> processBatch(messages) }
             }
         }
 
-        /**
-         * Groups messages by [keyExtractor] and processes each group sequentially (concatMap),
-         * with up to [concurrency] groups running in parallel. Emits positions only when
-         * contiguous prefix is complete, preventing offset gaps.
-         */
         fun <K : Any, M : Any> groupedEach(
             deserializer: Deserializer<M>,
             keyExtractor: (Processable<M>) -> K,
@@ -184,47 +128,46 @@ class DefaultProcessor<M : Any> private constructor(
             retryConfig: RetryConfig = RetryConfig(),
             concurrency: Int = 1,
         ): DefaultProcessor<M> {
-            val spec = retrySpec(retryConfig, "grouped")
-            val log = Logging.logger { }
+            val policy = retryPolicy(retryConfig)
+            val log    = Logging.logger { }
 
-            fun partitionPipeline(partition: Flux<Received>): Flux<Position> {
+            fun partitionPipeline(partition: Many<Received>): Many<Position> {
                 val tracker = ContiguousOffsetTracker()
-                return grouped(log, deserializer, keyExtractor, partition, spec)
-                    .flatMap(concurrency) { grouped ->
-                        when (val key = grouped.key()) {
-                            is GroupKey.Undefined -> grouped
-                                .mapNotNull { event ->
+                return deserialize(log, deserializer, partition, policy)
+                    .groupBy(
+                        keySelector = { event: GroupedEvent<M> ->
+                            when (event) {
+                                is GroupedEvent.Message -> GroupKey.Defined(keyExtractor(event.processable))
+                                is GroupedEvent.Ignored -> GroupKey.Undefined
+                            }
+                        },
+                        groupHandler = { key: GroupKey<K>, group: Many<GroupedEvent<M>> ->
+                            when (key) {
+                                is GroupKey.Undefined -> group.mapNotNull { event ->
                                     when (event) {
                                         is GroupedEvent.Ignored -> event.position
                                         is GroupedEvent.Message -> null
                                     }
                                 }
-                            is GroupKey.Defined -> {
-                                grouped
+                                is GroupKey.Defined -> group
                                     .mapNotNull { event ->
                                         when (event) {
-                                            is GroupedEvent.Message -> event.processable
-                                            is GroupedEvent.Ignored -> null
+                                            is GroupedEvent.Message<M> -> event.processable
+                                            is GroupedEvent.Ignored    -> null
                                         }
                                     }
                                     .concatMap { p: Processable<M> ->
-                                        fromCallable { handler(key.key, p); p.received.position }
-                                            .retryWhen(spec)
+                                        One.defer { handler(key.key, p); p.received.position }.retry(policy).asMany()
                                     }
                             }
-                        }
-                    }
-                    .mapNotNull { position -> tracker.onCompleted(position) }
+                        },
+                    )
+                    .mapNotNull { position: Position -> tracker.onCompleted(position) }
             }
 
             return DefaultProcessor { partition -> partitionPipeline(partition) }
         }
 
-        /**
-         * Groups messages by [keyExtractor], buffers into atomic batches per group, and processes
-         * each batch atomically. Up to [concurrency] groups run in parallel. Uses contiguous offset
-         * tracking for safe committing.
-         */
         fun <K : Any, M : Any> groupedBatch(
             deserializer: Deserializer<M>,
             keyExtractor: (Processable<M>) -> K,
@@ -234,79 +177,65 @@ class DefaultProcessor<M : Any> private constructor(
             retryConfig: RetryConfig = RetryConfig(),
             concurrency: Int = 1,
         ): DefaultProcessor<M> {
-            val spec = retrySpec(retryConfig, "grouped-batch")
-            val log = Logging.logger { }
+            val policy = retryPolicy(retryConfig)
+            val log    = Logging.logger { }
 
-            fun partitionPipeline(partition: Flux<Received>): Flux<Position> {
+            fun partitionPipeline(partition: Many<Received>): Many<Position> {
                 val tracker = ContiguousOffsetTracker()
-                return grouped(log, deserializer, keyExtractor, partition, spec)
-                    .flatMap(concurrency) { grouped ->
-                        when (val key = grouped.key()) {
-                            is GroupKey.Undefined -> grouped
-                                .mapNotNull { event ->
+                return deserialize(log, deserializer, partition, policy)
+                    .groupBy(
+                        keySelector = { event: GroupedEvent<M> ->
+                            when (event) {
+                                is GroupedEvent.Message -> GroupKey.Defined(keyExtractor(event.processable))
+                                is GroupedEvent.Ignored -> GroupKey.Undefined
+                            }
+                        },
+                        groupHandler = { key: GroupKey<K>, group: Many<GroupedEvent<M>> ->
+                            when (key) {
+                                is GroupKey.Undefined -> group.mapNotNull { event ->
                                     when (event) {
                                         is GroupedEvent.Ignored -> event.position
                                         is GroupedEvent.Message -> null
                                     }
                                 }
-                            is GroupKey.Defined -> {
-                                grouped
+                                is GroupKey.Defined -> group
                                     .mapNotNull { event ->
                                         when (event) {
-                                            is GroupedEvent.Message -> event.processable
-                                            is GroupedEvent.Ignored -> null
+                                            is GroupedEvent.Message<M> -> event.processable
+                                            is GroupedEvent.Ignored    -> null
                                         }
                                     }
-                                    .bufferTimeout(batchSize, batchDuration.toJavaDuration())
+                                    .bufferTimeout(batchSize, batchDuration)
                                     .filter { it.isNotEmpty() }
                                     .concatMap { batch: List<Processable<M>> ->
-                                        fromCallable {
+                                        One.defer {
                                             handler(key.key, batch)
-                                            batch.map { it.received.position }
-                                        }
-                                            .flatMapMany { Flux.fromIterable(it) }
-                                            .retryWhen(spec)
+                                            batch.map { p -> p.received.position }
+                                        }.retry(policy).flatMapMany { positions: List<Position> -> Many.of(positions) }
                                     }
                             }
-                        }
-                    }
-                    .mapNotNull { position -> tracker.onCompleted(position) }
+                        },
+                    )
+                    .mapNotNull { position: Position -> tracker.onCompleted(position) }
             }
 
             return DefaultProcessor { partition -> partitionPipeline(partition) }
         }
-        private fun <K, M> grouped(
+
+        private fun <M> deserialize(
             log: Logger,
             deserializer: Deserializer<M>,
-            keyExtractor: (Processable<M>) -> K,
-            partition: Flux<Received>,
-            spec: RetryBackoffSpec,
-        ): Flux<GroupedFlux<GroupKey<K>, GroupedEvent<M>>> = partition
-            .flatMap { received ->
-                fromCallable {
-                    when (val result = deserializer(received)) {
-                        is DeserializationResult.Message ->
-                            GroupedEvent.Message(Processable(received, result.value))
-
-                        is DeserializationResult.Tombstone -> {
-                            log.processing.tombstone(received.position)
-                            GroupedEvent.Ignored(received.position)
-                        }
-
-                        is DeserializationResult.PoisonPill -> {
-                            log.processing.poisonPill(received.position, result.reason)
-                            GroupedEvent.Ignored(received.position)
-                        }
-                    }
+            partition: Many<Received>,
+            policy: Policy.Retry,
+        ): Many<GroupedEvent<M>> = partition.flatMap { received: Received ->
+            One.defer {
+                when (val result = deserializer(received)) {
+                    is DeserializationResult.Message    -> GroupedEvent.Message(Processable(received, result.value))
+                    is DeserializationResult.Tombstone  -> { log.processing.tombstone(received.position); GroupedEvent.Ignored(received.position) }
+                    is DeserializationResult.PoisonPill -> { log.processing.poisonPill(received.position, result.reason); GroupedEvent.Ignored(received.position) }
                 }
-                .retryWhen(spec)
-            }
-            .groupBy { event ->
-                when (event) {
-                    is GroupedEvent.Message -> GroupKey.Defined(keyExtractor(event.processable))
-                    is GroupedEvent.Ignored -> GroupKey.Undefined
-                }
-            }
+            }.retry(policy).asMany()
+        }
     }
 }
 

@@ -1,6 +1,7 @@
 package se.oyabun.prozess
 
-import reactor.core.publisher.Mono
+import se.oyabun.aelv.None
+import se.oyabun.aelv.One
 import java.util.concurrent.ConcurrentLinkedQueue
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
@@ -61,17 +62,17 @@ internal class FakeKafkaClient : KafkaClient {
         commitFailuresRemaining++
     }
 
-    override fun partitionsFor(topics: Topics): Mono<Partitions> = Mono.just(
+    override fun partitionsFor(topics: Topics): One<Partitions> = One.of(
         topics.flatMap { t -> topicsToPartitions.getOrDefault(t, emptySet()) }.toSet()
     )
 
-    override fun beginningOffsets(partitions: Partitions): Mono<Positions> =
-        Mono.just(emptySet())
+    override fun beginningOffsets(partitions: Partitions): One<Positions> =
+        One.of(emptySet())
 
-    override fun endOffsets(partitions: Partitions): Mono<Positions> =
-        Mono.just(emptySet())
+    override fun endOffsets(partitions: Partitions): One<Positions> =
+        One.of(emptySet())
 
-    override fun subscribe(topics: Topics, listener: RebalanceListener): Mono<Topics> {
+    override fun subscribe(topics: Topics, listener: RebalanceListener): One<Topics> {
         subscribedTopics = topics
         val partitions = topics.flatMap { t ->
             topicsToPartitions.getOrDefault(t, emptySet())
@@ -80,63 +81,61 @@ internal class FakeKafkaClient : KafkaClient {
             listener.onPartitionsAssigned(FakeRebalanceContext(), partitions)
             initialAssignTriggered = true
         }
-        return Mono.just(topics)
+        return One.of(topics)
     }
 
-    override fun offsetsForTimes(partitions: Partitions, timestamp: Instant): Mono<Positions> =
-        Mono.just(emptySet())
+    override fun offsetsForTimes(partitions: Partitions, timestamp: Instant): One<Positions> =
+        One.of(emptySet())
 
-    override fun positionOf(partition: Partition): Mono<Long> =
-        Mono.just(positionOfResult(partition))
+    override fun positionOf(partition: Partition): One<Long> =
+        One.of(positionOfResult(partition))
 
-    override fun endOffsetOf(partition: Partition): Mono<Long> =
-        Mono.just(endOffsetOfResult(partition))
+    override fun endOffsetOf(partition: Partition): One<Long> =
+        One.of(endOffsetOfResult(partition))
 
-    override fun poll(timeout: Duration): Mono<List<Received>> = Mono.defer {
+    override fun poll(timeout: Duration): One<List<Received>> = One.defer {
         if (pollErrorRemaining > 0) {
             pollErrorRemaining--
-            Mono.error(pollError)
+            throw pollError
         } else {
             val entry = pollQueue.poll()
-            if (entry != null) Mono.just(entry) else Mono.just(emptyList())
+            entry ?: emptyList()
         }
     }
 
-    override fun pause(partitions: Partitions): Mono<Partitions> {
+    override fun pause(partitions: Partitions): One<Partitions> {
         pausedPartitions.add(partitions)
-        return Mono.just(partitions)
+        return One.of(partitions)
     }
 
-    override fun resume(partitions: Partitions): Mono<Partitions> {
+    override fun resume(partitions: Partitions): One<Partitions> {
         resumedPartitions.add(partitions)
-        return Mono.just(partitions)
+        return One.of(partitions)
     }
 
-    override fun commit(offsets: Offsets, metadata: String): Mono<Offsets> = Mono.defer {
+    override fun commit(offsets: Offsets, metadata: String): One<Offsets> = One.defer {
         if (commitFailuresRemaining > 0) {
             commitFailuresRemaining--
-            Mono.error(RuntimeException("fake commit failure"))
+            throw RuntimeException("fake commit failure")
         } else {
             commits.add(offsets to metadata)
-            Mono.just(offsets)
+            offsets
         }
     }
 
-    override fun committed(partitions: Partitions): Mono<Offsets> =
-        Mono.just(emptyMap())
+    override fun committed(partitions: Partitions): One<Offsets> =
+        One.of(emptyMap())
 
-    override fun seek(offsets: Offsets): Mono<Void> {
+    override fun seek(offsets: Offsets): None<Offsets> = None.defer {
         positions.putAll(offsets)
-        return Mono.empty()
     }
 
     override fun wakeup() {
         wakeupCount++
     }
 
-    override fun close(timeout: Duration): Mono<Void> {
+    override fun close(timeout: Duration): None<Unit> = None.defer {
         closed = true
-        return Mono.empty()
     }
 
     fun rebalanceContext(): RebalanceContext = FakeRebalanceContext()

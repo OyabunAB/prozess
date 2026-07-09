@@ -1,25 +1,37 @@
 package se.oyabun.prozess
 
+import kotlinx.coroutines.runBlocking
+import se.oyabun.aelv.Many
+import se.oyabun.aelv.None
+import se.oyabun.aelv.One
+import se.oyabun.aelv.Policy
+import se.oyabun.aelv.Sink
+import se.oyabun.aelv.concatMap
+import se.oyabun.aelv.delaySubscription
+import se.oyabun.aelv.doOnError
+import se.oyabun.aelv.doOnSubscribe
+import se.oyabun.aelv.drain
+import se.oyabun.aelv.filter
+import se.oyabun.aelv.flatMap
+import se.oyabun.aelv.flatMapMany
+import se.oyabun.aelv.map
+import se.oyabun.aelv.merge
+import se.oyabun.aelv.retry
+import se.oyabun.aelv.take
+import se.oyabun.aelv.takeUntilOther
+import se.oyabun.aelv.get
+import se.oyabun.aelv.groupBy
+import se.oyabun.aelv.zip
+import se.oyabun.prozess.EndOffset.CatchUp
 import se.oyabun.prozess.StartOffset.AtTimestamp
 import se.oyabun.prozess.StartOffset.Earliest
 import se.oyabun.prozess.StartOffset.Latest
-import reactor.core.publisher.Flux
-import reactor.core.publisher.Mono
-import reactor.core.publisher.Mono.empty
-import reactor.core.publisher.Mono.just
-import reactor.core.publisher.Mono.never
-import reactor.core.publisher.Mono.zip
-import reactor.core.publisher.Sinks
-import reactor.util.concurrent.Queues
-import reactor.util.retry.Retry
-import se.oyabun.prozess.EndOffset.CatchUp
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
-import kotlin.time.toJavaDuration
 
 @OptIn(ExperimentalAtomicApi::class)
 class StreamingConsumer<M : Any>(
@@ -28,97 +40,96 @@ class StreamingConsumer<M : Any>(
     instance: String? = "consumer",
     private val client: KafkaClient = ThreadsafeKafkaClient(config),
 ) {
-    private val log = Logging.logger { }
+    private val log        = Logging.logger { }
     private val instanceId = "[$instance ${config.topics} consumer]"
-    private val eventSink = Sinks.many().multicast().onBackpressureBuffer<ConsumerEvent>()
-    private val eventSubscriptions = java.util.concurrent.CopyOnWriteArrayList<reactor.core.Disposable>()
 
-    /** Reactive stream of consumer lifecycle events. Emits events from the point of subscription onward. */
-    val events: Flux<ConsumerEvent> = eventSink.asFlux()
+    private val eventSink   = Sink.replay<ConsumerEvent>()
+    private val closeSignal = Sink.broadcast<Unit>()
+    private val disposed    = java.util.concurrent.atomic.AtomicBoolean(false)
 
-    /** Registers a callback for lifecycle events. Bound to this consumer's lifetime. */
+    private val ends         = AtomicReference<Positions>(emptySet())
+    private val started      = AtomicBoolean(false)
+    private val pendingSeeks = AtomicReference<Offsets>(emptyMap())
+    private val paused       = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    val events: Many<ConsumerEvent> = eventSink.asMany()
+
+    private val eventCallbacks = java.util.concurrent.CopyOnWriteArrayList<(ConsumerEvent) -> Unit>()
+
     fun onEvent(callback: (ConsumerEvent) -> Unit) {
-        eventSubscriptions.add(events.subscribe(callback))
+        eventCallbacks.add(callback)
     }
 
-    private val ends = AtomicReference<Positions>(emptySet())
-    private val started = AtomicBoolean(false)
-    private val highWaterMark = config.maxPollRecords
-    private val lowWaterMark = config.maxPollRecords / 4
-    private val pendingSeeks = AtomicReference<Offsets>(emptyMap())
-    private val paused = java.util.concurrent.atomic.AtomicBoolean(false)
-    private val closeSignal = Sinks.one<Unit>()
-    private val disposed = java.util.concurrent.atomic.AtomicBoolean(false)
-    private val pollerShutdown = Sinks.one<Unit>()
-    private val pollingDone = Sinks.one<Unit>()
     private val buffer = InMemoryReceivedBuffer(
-        delegate = Queues.unbounded<Received>().get(),
-        highWaterMark = highWaterMark,
-        lowWaterMark = lowWaterMark,
-        onPause = {
-            val current = partitionManager.assignments()
-            if (current.isNotEmpty()) client.pause(current).subscribe()
-        },
-        onResume = {
-            val current = partitionManager.assignments()
-            if (current.isNotEmpty()) client.resume(current).subscribe()
-        },
+        highWaterMark = config.maxPollRecords,
+        lowWaterMark  = config.maxPollRecords / 4,
+        onPause  = { val current = partitionManager.assignments(); if (current.isNotEmpty()) runBlocking { client.pause(current).get() } },
+        onResume = { val current = partitionManager.assignments(); if (current.isNotEmpty()) runBlocking { client.resume(current).get() } },
     )
+
     private val partitionManager = CoordinatingPartitionManager(
         pendingSeeks = pendingSeeks,
-        ends = ends,
-        paused = paused::get,
-        instanceId = instanceId,
-        log = log,
+        ends         = ends,
+        paused       = paused::get,
+        instanceId   = instanceId,
+        log          = log,
     )
+
     private val committer: Committer = BufferedCommitter(
-        client = client,
-        instanceId = instanceId,
+        client      = client,
+        instanceId  = instanceId,
         assignments = partitionManager::assignments,
-        log = log,
-        bufferSize = config.maxPollRecords,
+        log         = log,
+        bufferSize  = config.maxPollRecords,
     )
+
+    private val pollerShutdown = Sink.broadcast<Unit>()
+    private val pollingDone    = Sink.broadcast<Unit>()
+
     private val poller: Poller = BufferedPoller(
-        client = client,
-        buffer = buffer,
-        assignments = partitionManager::assignments,
-        instanceId = instanceId,
+        client       = client,
+        buffer       = buffer,
+        assignments  = partitionManager::assignments,
+        instanceId   = instanceId,
         pollInterval = config.pollInterval,
         shutdownSink = pollerShutdown,
-        done = pollingDone,
-        log = log,
+        doneSink     = pollingDone,
+        log          = log,
     )
 
     fun start(
         from: StartOffset = config.startOffset,
-        until: EndOffset = EndOffset.Continuous,
+        until: EndOffset  = EndOffset.Continuous,
     ) {
         check(started.compareAndSet(false, true)) { "$instanceId start() called more than once" }
         poller.start()
         committer.start()
-        eventSink.tryEmitNext(ConsumerEvent.Started)
+        emitEvent(ConsumerEvent.Started)
         val complete = completionSignal()
-        val sync = syncSignal(until, complete)
-        incomingFeed(sync, closeSignal.asMono(), from, until)
-            .groupBy { it.position.partition }
-            .flatMap { partition -> processor.process(partition) }
-            .flatMap { position -> committer.markProcessed(position) }
-            .subscribe()
+        val sync     = syncSignal(until, complete)
+        incomingFeed(sync, closeSignal.asMany(), from, until)
+            .groupBy(
+                keySelector  = { received: Received -> received.position.partition },
+                groupHandler = { _, group -> processor.process(group) },
+            )
+            .concatMap { position ->
+                One.defer { committer.markProcessed(position); position }.asMany()
+            }
+            .drain({}, {})
     }
 
     fun shutdown(duration: Duration? = null) {
         if (!disposed.compareAndSet(false, true)) return
-        eventSink.tryEmitNext(ConsumerEvent.Stopped)
-        eventSink.tryEmitComplete()
-        eventSubscriptions.forEach { it.dispose() }
-        eventSubscriptions.clear()
+        emitEvent(ConsumerEvent.Stopped)
+        eventSink.complete()
+        eventCallbacks.clear()
         ShutdownCoordinator(
-            client = client,
+            client      = client,
             closeSignal = closeSignal,
-            poller = poller,
-            committer = committer,
-            instanceId = instanceId,
-            log = log,
+            poller      = poller,
+            committer   = committer,
+            instanceId  = instanceId,
+            log         = log,
         ).shutdown(duration)
     }
 
@@ -127,121 +138,122 @@ class StreamingConsumer<M : Any>(
     fun pause() {
         paused.set(true)
         poller.pause()
-        eventSink.tryEmitNext(ConsumerEvent.Paused)
+        emitEvent(ConsumerEvent.Paused)
     }
 
     fun resume() {
         paused.set(false)
         poller.resume()
-        eventSink.tryEmitNext(ConsumerEvent.Resumed)
+        emitEvent(ConsumerEvent.Resumed)
+    }
+
+    private fun emitEvent(event: ConsumerEvent) {
+        eventSink.emit(event)
+        eventCallbacks.forEach { it(event) }
     }
 
     private fun incomingFeed(
-        sync: Mono<Received>,
-        closeSignal: Mono<Unit>,
+        sync: Many<Received>,
+        closeSignal: Many<Unit>,
         from: StartOffset,
         until: EndOffset,
-    ): Flux<Received> = client.partitionsFor(config.topics)
+    ): Many<Received> = client.partitionsFor(config.topics)
         .flatMapMany { topicPartitions ->
             val awaitSubscription = client.subscribe(
                 config.topics,
                 object : RebalanceListener {
                     override fun onPartitionsRevoked(context: RebalanceContext, partitions: Partitions) {
                         partitionManager.onPartitionsRevoked(context, partitions, committer.processedOffsets)
-                        eventSink.tryEmitNext(ConsumerEvent.Revoked(partitions))
+                        emitEvent(ConsumerEvent.Revoked(partitions))
                     }
                     override fun onPartitionsAssigned(context: RebalanceContext, partitions: Partitions) {
                         val seeds = partitionManager.onPartitionsAssigned(context, partitions)
                         if (seeds.isNotEmpty()) committer.seedOffsets(seeds)
-                        eventSink.tryEmitNext(ConsumerEvent.Assigned(partitions))
+                        emitEvent(ConsumerEvent.Assigned(partitions))
                     }
                 },
             )
-            val messages = buffer.asFlux()
+            val messages = buffer.asMany()
                 .filter { it.position.partition in partitionManager.assignments() }
                 .takeUntilOther(sync)
-            val synchronizedMessages = Flux.merge(messages, sync)
+            val synchronizedMessages = merge(messages, sync)
             initOffsets(topicPartitions, from, until)
-                .then(awaitSubscription)
-                .thenMany(synchronizedMessages)
+                .flatMapMany { awaitSubscription.flatMapMany { synchronizedMessages } }
         }
         .takeUntilOther(closeSignal)
         .doOnSubscribe { log.kafka.subscribed(instanceId, config.topics) }
-        .doOnError { cause -> log.kafka.consumerFailed(instanceId, config.topics, cause) }
-        .doOnTerminate { log.kafka.shuttingDown(instanceId, config.topics) }
-        .retryWhen(notCancelled)
+        .doOnError { cause -> log.kafka.consumerFailed(instanceId, config.topics, cause.cause ?: cause) }
+        .retry(Policy.retry().withBackoff(500.milliseconds, 30.seconds))
 
-    private val notCancelled = Retry.backoff(Long.MAX_VALUE, 500.milliseconds.toJavaDuration())
-        .maxBackoff(30.seconds.toJavaDuration())
-        .doBeforeRetry { log.kafka.listenerRetrying(instanceId, config.topics, it.failure()) }
-        .doAfterRetry { log.kafka.listenerRestarted(instanceId, config.topics) }
+    private fun initOffsets(topicPartitions: Partitions, from: StartOffset, until: EndOffset): One<Positions> {
+        val loadEndings: One<Positions> = if (until is CatchUp)
+            client.endOffsets(topicPartitions).map { it.also { e -> ends.store(e) } }
+        else One.of(emptySet())
 
-    private fun initOffsets(topicPartitions: Partitions, from: StartOffset, until: EndOffset): Mono<Positions> {
-        val loadEndings = if (until is CatchUp) client.endOffsets(topicPartitions).map { it.also { ends.store(it) } } else just(emptySet())
-        val loadBeginnings = when (from) {
-            is Earliest -> client.committed(topicPartitions)
-                .flatMap { committed ->
-                    val unseeded = topicPartitions.filter { it !in committed }.toSet()
-                    if (unseeded.isEmpty()) just(emptySet())
-                    else client.beginningOffsets(unseeded)
-                        .map { beginnings ->
-                            val targets = beginnings.asOffsets()
-                            if (targets.isNotEmpty()) pendingSeeks.store(targets)
-                            beginnings
-                        }
+        val loadBeginnings: One<Positions> = when (from) {
+            is Earliest -> client.committed(topicPartitions).flatMap { committed ->
+                val unseeded = topicPartitions.filter { it !in committed }.toSet()
+                if (unseeded.isEmpty()) One.of(emptySet())
+                else client.beginningOffsets(unseeded).map { beginnings ->
+                    val targets = beginnings.asOffsets()
+                    if (targets.isNotEmpty()) pendingSeeks.store(targets)
+                    beginnings
                 }
-            is Latest -> just(emptySet())
-            is AtTimestamp -> client.offsetsForTimes(topicPartitions, from.instant)
-                .flatMap { positions: Positions ->
-                    if (positions.isEmpty()) client.endOffsets(topicPartitions)
-                        .map { endOffsets ->
-                            val targets = endOffsets.asOffsets()
-                            if (targets.isNotEmpty()) pendingSeeks.store(targets)
-                            endOffsets
-                        }
-                    else zip(
-                        just(positions.asOffsets()),
-                            client.committed(topicPartitions),
-                        ) { targets, committed ->
-                            val filtered = targets.filterKeys { p ->
-                                val known = committed[p]
-                                known == null || known <= (targets[p] ?: 0L)
-                            }
-                            if (filtered.isNotEmpty()) pendingSeeks.store(filtered)
-                            positions
-                        }
+            }
+            is Latest -> One.of(emptySet())
+            is AtTimestamp -> client.offsetsForTimes(topicPartitions, from.instant).flatMap { positions ->
+                if (positions.isEmpty())
+                    client.endOffsets(topicPartitions).map { endOffsets ->
+                        val targets = endOffsets.asOffsets()
+                        if (targets.isNotEmpty()) pendingSeeks.store(targets)
+                        endOffsets
+                    }
+                else zip(One.of(positions.asOffsets()), client.committed(topicPartitions)) { targets, committed ->
+                    val filtered = targets.filterKeys { p ->
+                        val known = committed[p]
+                        known == null || known <= (targets[p] ?: 0L)
+                    }
+                    if (filtered.isNotEmpty()) pendingSeeks.store(filtered)
+                    positions
                 }
+            }
         }
+
         return when {
-            from is Earliest && until is CatchUp -> loadBeginnings.flatMap { loadEndings }
-            from is Earliest -> loadBeginnings
+            from is Earliest && until is CatchUp    -> loadBeginnings.flatMap { loadEndings }
+            from is Earliest                        -> loadBeginnings
             from is AtTimestamp && until is CatchUp -> loadBeginnings.flatMap { loadEndings }
-            until is CatchUp -> loadEndings
-            from is AtTimestamp -> loadBeginnings
-            else -> just(emptySet())
+            until is CatchUp                        -> loadEndings
+            from is AtTimestamp                     -> loadBeginnings
+            else                                    -> One.of(emptySet())
         }
     }
 
-    private fun completionSignal(): Mono<Void> = committer.positions
-        .map {
+    private fun completionSignal(): Many<Position> = committer.positions
+        .filter { _ ->
             partitionManager.assignments().all { partition ->
                 val lastPosition = ends.load().find { it.partition == partition }
                 lastPosition == null || (committer.processedOffsets[partition] ?: 0L) >= lastPosition.offset
             }
         }
-        .filter { it }.next().then().cache()
+        .take(1)
 
-    private fun syncSignal(until: EndOffset, complete: Mono<Void>): Mono<Received> = when (until) {
-        is CatchUp -> empty<Received>().delaySubscription(complete)
-        is EndOffset.Continuous -> never()
+    private fun syncSignal(until: EndOffset, complete: Many<Position>): Many<Received> = when (until) {
+        is CatchUp              -> Many.empty<Received>().delaySubscription(complete)
+        is EndOffset.Continuous -> Many.never()
     }
 
     fun hasNoAssignments(): Boolean = partitionManager.assignments().isEmpty()
 
     fun position(partition: Partition): Long =
-        client.positionOf(partition).block() ?: throw ConsumerNotActive("$instanceId position() failed for $partition")
+        runBlocking { client.positionOf(partition).get() }
+            .leftOrNull() ?: throw ConsumerNotActive("$instanceId position() failed for $partition")
 
-    fun lag(partition: Partition): Long =
-        client.endOffsetOf(partition).zipWith(client.positionOf(partition)).map { it.t1 - it.t2 }.block()
+    fun lag(partition: Partition): Long = runBlocking {
+        val end = client.endOffsetOf(partition).get().leftOrNull()
             ?: throw ConsumerNotActive("$instanceId lag() failed for $partition")
+        val pos = client.positionOf(partition).get().leftOrNull()
+            ?: throw ConsumerNotActive("$instanceId lag() failed for $partition")
+        end - pos
+    }
 }

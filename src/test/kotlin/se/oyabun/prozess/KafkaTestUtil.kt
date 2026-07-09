@@ -8,23 +8,10 @@ import org.apache.kafka.clients.producer.ProducerConfig as ApacheProducerConfig
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.serialization.ByteArraySerializer
 import org.apache.kafka.common.serialization.StringSerializer
-import reactor.core.publisher.Sinks
-import java.time.Duration
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.time.toJavaDuration
-import kotlin.time.Duration.Companion.seconds
-
-fun <T : Any> Sinks.Many<T>.drainAll(timeout: Duration = 30.seconds.toJavaDuration()): List<T> =
-    asFlux().collectList().timeout(timeout).block()!!
-
-fun <T : Any> Sinks.Many<T>.drain(count: Int, timeout: Duration = 30.seconds.toJavaDuration()): List<T> =
-    asFlux().take(count.toLong()).collectList().timeout(timeout).block()!!
-
-fun <T : Any> Sinks.Many<T>.drain(duration: kotlin.time.Duration): List<T> =
-    asFlux().take(duration.toJavaDuration()).collectList().block()!!
 
 fun topic(bootstrapServers: String, partitions: Int = 1): String = UUID.randomUUID().toString().also { name ->
     AdminClient.create(mapOf(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG to bootstrapServers))
@@ -116,7 +103,7 @@ fun onStopped(consumer: Prozess.Consumer<*>): CountDownLatch {
 /**
  * Blocks until [latch] reaches zero. Use with [onAssigned] or [onStopped].
  */
-fun awaitLatch(latch: CountDownLatch, timeoutSeconds: Long = 30) {
+fun awaitLatch(latch: CountDownLatch, timeoutSeconds: Long = 5) {
     check(latch.await(timeoutSeconds, TimeUnit.SECONDS)) {
         "Timed out waiting for latch (${latch.count} remaining)"
     }

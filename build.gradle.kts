@@ -13,11 +13,19 @@ version = System.getenv("VERSION") ?: "0.0.0-SNAPSHOT"
 repositories {
     mavenCentral()
     mavenLocal()
+    maven {
+        url = uri("https://maven.pkg.github.com/OyabunAB/aelv")
+        credentials {
+            username = findProperty("gpr.user") as String? ?: System.getenv("GITHUB_ACTOR")
+            password = findProperty("gpr.key") as String? ?: System.getenv("GITHUB_TOKEN")
+        }
+    }
 }
 
 dependencies {
     api(libs.kafka.clients)
-    api(libs.reactor.core)
+    api(libs.aelv)
+    implementation(libs.coroutines.core)
     implementation(libs.bundles.logging)
     testImplementation(libs.bundles.test)
 }

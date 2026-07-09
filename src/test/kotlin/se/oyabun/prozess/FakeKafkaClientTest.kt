@@ -1,19 +1,20 @@
 package se.oyabun.prozess
 
+import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
-import reactor.core.publisher.Sinks
-import reactor.test.StepVerifier
-import se.oyabun.prozess.Logging
-import se.oyabun.prozess.Partition
-import se.oyabun.prozess.Position
-import se.oyabun.prozess.Received
-import se.oyabun.prozess.Topic
+import org.junit.jupiter.api.Timeout
+import se.oyabun.aelv.Sink
+import se.oyabun.aelv.get
+import se.oyabun.aelv.Verify
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
+@Timeout(value = 5, unit = TimeUnit.SECONDS)
 @OptIn(ExperimentalAtomicApi::class)
 class FakeKafkaClientTest {
 
@@ -31,21 +32,21 @@ class FakeKafkaClientTest {
 
         client.queuePollResults(listOf(r1), listOf(r2), emptyList())
 
-        StepVerifier.create(client.poll(100.milliseconds))
-            .expectNext(listOf(r1))
-            .verifyComplete()
-        StepVerifier.create(client.poll(100.milliseconds))
-            .expectNext(listOf(r2))
-            .verifyComplete()
+        Verify.that(client.poll(100.milliseconds))
+            .emitsNext(listOf(r1))
+            .completesNormally()
+        Verify.that(client.poll(100.milliseconds))
+            .emitsNext(listOf(r2))
+            .completesNormally()
     }
 
     @Test
     fun `empty poll when queue drained`() {
         val client = FakeKafkaClient()
 
-        StepVerifier.create(client.poll(100.milliseconds))
-            .expectNext(emptyList<Received>())
-            .verifyComplete()
+        Verify.that(client.poll(100.milliseconds))
+            .emitsNext(emptyList<Received>())
+            .completesNormally()
     }
 
     @Test
@@ -53,7 +54,7 @@ class FakeKafkaClientTest {
         val client = FakeKafkaClient()
         val offsets = mapOf(p0 to 10L)
 
-        client.commit(offsets, "test-meta").block()!!
+        runBlocking { client.commit(offsets, "test-meta").get() }
 
         assertEquals(1, client.commits.size)
         assertEquals(offsets, client.commits.peek().first)
@@ -70,7 +71,7 @@ class FakeKafkaClientTest {
             override fun onPartitionsAssigned(context: RebalanceContext, partitions: Partitions) { assigned.add(partitions) }
         }
 
-        client.subscribe(setOf("test"), listener).block()!!
+        runBlocking { client.subscribe(setOf("test"), listener).get() }
 
         assertEquals(setOf("test"), client.subscribedTopics)
         assertEquals(1, assigned.size)
@@ -114,7 +115,7 @@ class FakeKafkaClientTest {
         val client = FakeKafkaClient()
 
         client.wakeup()
-        client.close().block()
+        runBlocking { client.close().await() }
 
         assertEquals(1, client.wakeupCount)
         assertTrue(client.closed)
@@ -125,7 +126,7 @@ class FakeKafkaClientTest {
         val client = FakeKafkaClient()
         client.setPartitionsFor("test", setOf(p0, p1))
 
-        val result = client.partitionsFor(setOf("test")).block()!!
+        val result = runBlocking { client.partitionsFor(setOf("test")).get().leftOrNull()!! }
 
         assertEquals(setOf(p0, p1), result)
     }
@@ -142,12 +143,14 @@ class FakeKafkaClientTest {
             instanceId = "test",
             log = Logging.logger { },
             maxBatchSize = 1,
-            maxBatchTime = java.time.Duration.ofSeconds(1),
+            maxBatchTime = 1.seconds,
         )
 
         committer.start()
-        committer.markProcessed(Position(p0, 5L)).block()!!
-        committer.stop().block()
+        runBlocking {
+            committer.markProcessed(Position(p0, 5L))
+            committer.stop().await()
+        }
 
         assertTrue(fake.commits.isNotEmpty(), "expected commit")
         assertEquals(mapOf(p0 to 6L), fake.commits.peek().first)
@@ -275,12 +278,14 @@ class FakeKafkaClientTest {
             instanceId = "test",
             log = Logging.logger { },
             maxBatchSize = 1,
-            maxBatchTime = java.time.Duration.ofSeconds(5),
+            maxBatchTime = 5.seconds,
         )
 
         committer.start()
-        committer.markProcessed(Position(p0, 7L)).block()
-        committer.stop().block()
+        runBlocking {
+            committer.markProcessed(Position(p0, 7L))
+            committer.stop().await()
+        }
 
         assertEquals(1, fake.commits.size)
         assertEquals(mapOf(p0 to 8L), fake.commits.peek().first,
@@ -323,14 +328,16 @@ class FakeKafkaClientTest {
             instanceId = "test",
             log = Logging.logger { },
             maxBatchSize = 1,
-            maxBatchTime = java.time.Duration.ofSeconds(5),
+            maxBatchTime = 5.seconds,
         )
 
         committer.start()
-        committer.markProcessed(Position(p0, 1L)).block()
-        committer.markProcessed(Position(p0, 2L)).block()
-        committer.markProcessed(Position(p0, 3L)).block()
-        committer.stop().block()
+        runBlocking {
+            committer.markProcessed(Position(p0, 1L))
+            committer.markProcessed(Position(p0, 2L))
+            committer.markProcessed(Position(p0, 3L))
+            committer.stop().await()
+        }
 
         val offsets = fake.commits.map { (offsets, _) -> offsets[p0]!! }
         assertEquals(listOf(2L, 3L, 4L), offsets,
@@ -351,12 +358,14 @@ class FakeKafkaClientTest {
             instanceId = "test",
             log = Logging.logger { },
             maxBatchSize = 1,
-            maxBatchTime = java.time.Duration.ofSeconds(5),
+            maxBatchTime = 5.seconds,
         )
 
         committer.start()
-        committer.markProcessed(Position(p0, 5L)).block()
-        committer.stop().block()
+        runBlocking {
+            committer.markProcessed(Position(p0, 5L))
+            committer.stop().await()
+        }
 
         assertTrue(fake.commits.isNotEmpty(), "commit must eventually succeed after retries")
         assertEquals(mapOf(p0 to 6L), fake.commits.peek().first,
@@ -368,8 +377,8 @@ class FakeKafkaClientTest {
         val fake = FakeKafkaClient()
         val buffer = InMemoryReceivedBuffer()
         val assignments = java.util.concurrent.atomic.AtomicReference(setOf(p0))
-        val shutdownSink = Sinks.one<Unit>()
-        val done = Sinks.one<Unit>()
+        val shutdownSink = Sink.broadcast<Unit>()
+        val doneSink = Sink.broadcast<Unit>()
 
         fake.failNextPoll(RuntimeException("transient error"))
 
@@ -380,14 +389,14 @@ class FakeKafkaClientTest {
             instanceId = "test",
             pollInterval = 50.milliseconds,
             shutdownSink = shutdownSink,
-            done = done,
+            doneSink = doneSink,
             log = Logging.logger { },
         )
 
         poller.start()
         assertTrue(poller.isRunning, "poller must stay running despite poll error")
-        shutdownSink.tryEmitValue(Unit)
-        poller.stop().block()
+        shutdownSink.complete()
+        runBlocking { poller.stop().await() }
     }
 
     @Test

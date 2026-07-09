@@ -1,5 +1,7 @@
 package se.oyabun.prozess
 
+import kotlinx.coroutines.runBlocking
+import se.oyabun.aelv.get
 import kotlin.time.Duration
 
 object Prozess {
@@ -80,13 +82,16 @@ object Prozess {
         instance: String? = "producer",
     ): Producer<M> = object : Producer<M> {
         val delegate = StreamingProducer(config, instance, serializer)
-        override fun send(key: String, value: M, partition: Int?, timestamp: Long?, headers: Headers): Long { return delegate.send(key, value, partition, timestamp, headers).blockOptional().orElseThrow() }
-        override fun sendOffsetsToTransaction(offsets: Offsets, member: GroupMember) { delegate.sendOffsetsToTransaction(offsets, member).block() }
-        override fun initTransactions() { delegate.initTransactions().block() }
-        override fun beginTransaction() { delegate.beginTransaction().block() }
-        override fun commitTransaction() { delegate.commitTransaction().block() }
-        override fun abortTransaction() { delegate.abortTransaction().block() }
-        override fun close() { delegate.close().block() }
+        override fun send(key: String, value: M, partition: Int?, timestamp: Long?, headers: Headers): Long {
+            val result = runBlocking { delegate.send(key, value, partition, timestamp, headers).get() }
+            return result.leftOrNull() ?: throw SendFailure("$instance send failed", RuntimeException(result.rightOrNull()?.message))
+        }
+        override fun sendOffsetsToTransaction(offsets: Offsets, member: GroupMember) { runBlocking { delegate.sendOffsetsToTransaction(offsets, member).await() } }
+        override fun initTransactions()  { runBlocking { delegate.initTransactions().await() } }
+        override fun beginTransaction()  { runBlocking { delegate.beginTransaction().await() } }
+        override fun commitTransaction() { runBlocking { delegate.commitTransaction().await() } }
+        override fun abortTransaction()  { runBlocking { delegate.abortTransaction().await() } }
+        override fun close()             { runBlocking { delegate.close().await() } }
     }
 
     /** Builds a [Consumer] by configuring the processing pipeline. */

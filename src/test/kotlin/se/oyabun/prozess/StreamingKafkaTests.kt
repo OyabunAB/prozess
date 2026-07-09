@@ -1,5 +1,6 @@
 package se.oyabun.prozess
 
+import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.Nested
@@ -7,14 +8,15 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
 import org.junit.jupiter.api.TestInstance.Lifecycle
 import org.testcontainers.kafka.KafkaContainer
-import reactor.core.publisher.Flux
-import reactor.test.StepVerifier.create
-import se.oyabun.prozess.StreamingProducer
+import se.oyabun.aelv.Many
+import se.oyabun.aelv.last
+import se.oyabun.aelv.toList
+import se.oyabun.aelv.Verify
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 @TestInstance(Lifecycle.PER_CLASS)
-class ReactorKafkaTests {
+class StreamingKafkaTests {
 
     private val kafka = KafkaContainer("apache/kafka-native:3.9.2")
     private val bootstrapServers get() = kafka.bootstrapServers
@@ -34,9 +36,10 @@ class ReactorKafkaTests {
             val config = ProducerConfig(bootstrapServers, Topic(topic))
             val producer = StreamingProducer<String>(config) { it.toByteArray() }
             val messages = (1..10).map { "msg-$it" }
-            val result = producer.sendAll(Flux.fromIterable(messages), key = { it }).collectList()
-            create(result).assertNext { assertTrue { it.containsAll(messages) } }.verifyComplete()
-            producer.close().block()
+            Verify.that(producer.sendAll(Many.of(messages), key = { it }).toList())
+                .matchesNext { assertTrue(it.containsAll(messages)) }
+                .completesNormally()
+            runBlocking { producer.close().await() }
         }
 
         @Test
@@ -47,8 +50,8 @@ class ReactorKafkaTests {
             val payload = "hello"
             val keyExtractor: Prozess.KeyExtraction<String> = { it }
             val headerProvider: Prozess.HeadersProvider<String> = { listOf(Header("trace-id", "${it}-123".toByteArray())) }
-            producer.sendAll(Flux.just(payload), keyExtractor, headerProvider).blockLast()
-            producer.close().block()
+            runBlocking { producer.sendAll(Many.of(payload), keyExtractor, headerProvider).last() }
+            runBlocking { producer.close().await() }
 
             val receivedHeaders = mutableListOf<Headers>()
             val latch = java.util.concurrent.CountDownLatch(1)

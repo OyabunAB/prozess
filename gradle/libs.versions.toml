@@ -2,7 +2,8 @@
 
 kotlin = "2.4.0"
 jvm = "21"
-reactor = "3.8.6"
+aelv = "1.0.0-rc.1"
+coroutines = "1.10.2"
 kafka_clients = "3.9.2"
 kotlin_logging = "3.0.5"
 logback_classic = "1.5.17"
@@ -11,16 +12,17 @@ testcontainers = "2.0.5"
 dokka = "2.2.0"
 
 [libraries]
-kafka_clients = { group = "org.apache.kafka", name = "kafka-clients", version.ref = "kafka_clients" }
-reactor_core = { group = "io.projectreactor", name = "reactor-core", version.ref = "reactor" }
-kotlin_logging = { group = "io.github.microutils", name = "kotlin-logging", version.ref = "kotlin_logging" }
-logback_classic = { group = "ch.qos.logback", name = "logback-classic", version.ref = "logback_classic" }
-logstash_encoder = { group = "net.logstash.logback", name = "logstash-logback-encoder", version.ref = "logstash_encoder" }
+kafka_clients    = { group = "org.apache.kafka",         name = "kafka-clients",           version.ref = "kafka_clients" }
+aelv             = { group = "se.oyabun",                name = "aelv",                    version.ref = "aelv" }
+coroutines_core  = { group = "org.jetbrains.kotlinx",    name = "kotlinx-coroutines-core", version.ref = "coroutines" }
+kotlin_logging   = { group = "io.github.microutils",     name = "kotlin-logging",          version.ref = "kotlin_logging" }
+logback_classic  = { group = "ch.qos.logback",           name = "logback-classic",         version.ref = "logback_classic" }
+logstash_encoder = { group = "net.logstash.logback",     name = "logstash-logback-encoder", version.ref = "logstash_encoder" }
 
-kotlin_test = { group = "org.jetbrains.kotlin", name = "kotlin-test", version.ref = "kotlin" }
-kotlin_test_junit5 = { group = "org.jetbrains.kotlin", name = "kotlin-test-junit5", version.ref = "kotlin" }
-reactor_test = { group = "io.projectreactor", name = "reactor-test", version.ref = "reactor" }
-testcontainer_kafka = { group = "org.testcontainers", name = "testcontainers-kafka", version.ref = "testcontainers" }
+kotlin_test          = { group = "org.jetbrains.kotlin", name = "kotlin-test",       version.ref = "kotlin" }
+kotlin_test_junit5   = { group = "org.jetbrains.kotlin", name = "kotlin-test-junit5", version.ref = "kotlin" }
+coroutines_test      = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
+testcontainer_kafka  = { group = "org.testcontainers",   name = "testcontainers-kafka", version.ref = "testcontainers" }
 
 [bundles]
 logging = [
@@ -31,13 +33,13 @@ test = [
     "kotlin_test_junit5",
     "logback_classic",
     "logstash_encoder",
-    "reactor_test",
+    "coroutines_test",
     "testcontainer_kafka"
 ]
 
 [plugins]
-kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
-mavenPublish = { id = "maven-publish" }
-dokka = { id = "org.jetbrains.dokka", version.ref = "dokka" }
-signing = { id = "signing" }
-nexusPublish = { id = "io.github.gradle-nexus.publish-plugin", version = "2.0.0" }
+kotlin-jvm    = { id = "org.jetbrains.kotlin.jvm",              version.ref = "kotlin" }
+mavenPublish  = { id = "maven-publish" }
+dokka         = { id = "org.jetbrains.dokka",                   version.ref = "dokka" }
+signing       = { id = "signing" }
+nexusPublish  = { id = "io.github.gradle-nexus.publish-plugin", version = "2.0.0" }

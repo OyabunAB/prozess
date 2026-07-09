@@ -6,10 +6,13 @@ import org.apache.kafka.common.errors.SaslAuthenticationException
 import org.apache.kafka.common.errors.SerializationException
 import org.apache.kafka.common.errors.TimeoutException as KafkaTimeoutException
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.Timeout
+import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertSame
 
+@Timeout(value = 5, unit = TimeUnit.SECONDS)
 class ErrorsTest {
 
     @Test
