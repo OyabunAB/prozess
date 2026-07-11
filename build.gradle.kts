@@ -6,6 +6,7 @@ plugins {
     alias(libs.plugins.dokka)
     alias(libs.plugins.signing)
     alias(libs.plugins.nexusPublish)
+    alias(libs.plugins.jmh)
 }
 
 version = System.getenv("VERSION") ?: "0.0.0-SNAPSHOT"
@@ -28,6 +29,9 @@ dependencies {
     implementation(libs.coroutines.core)
     implementation(libs.bundles.logging)
     testImplementation(libs.bundles.test)
+
+    "jmhImplementation"(libs.bundles.jmh)
+    "jmhAnnotationProcessor"(libs.jmh.annprocess)
 }
 
 val isRelease: Boolean = Regex("""^\d+\.\d+\.\d+$""").matches(version.toString())
@@ -70,6 +74,17 @@ tasks.test {
         events("started", "passed", "skipped", "failed")
         showStandardStreams = true
     }
+}
+
+jmh {
+    warmupIterations = 3
+    iterations = 5
+    fork = 1
+    timeUnit = "ms"
+    benchmarkMode = listOf("thrpt")
+    resultFormat = "JSON"
+    resultsFile = project.file("build/reports/jmh/results.json")
+    zip64 = true
 }
 
 val sourcesJar = tasks.register<Jar>("sourcesJar") {

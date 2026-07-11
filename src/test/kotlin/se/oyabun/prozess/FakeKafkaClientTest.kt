@@ -3,7 +3,7 @@ package se.oyabun.prozess
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
-import se.oyabun.aelv.Sink
+import se.oyabun.aelv.Sinks
 import se.oyabun.aelv.get
 import se.oyabun.aelv.Verify
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -377,8 +377,8 @@ class FakeKafkaClientTest {
         val fake = FakeKafkaClient()
         val buffer = InMemoryReceivedBuffer()
         val assignments = java.util.concurrent.atomic.AtomicReference(setOf(p0))
-        val shutdownSink = Sink.broadcast<Unit>()
-        val doneSink = Sink.broadcast<Unit>()
+        val shutdownSink = Sinks.broadcast<Unit>()
+        val doneSink = Sinks.broadcast<Unit>()
 
         fake.failNextPoll(RuntimeException("transient error"))
 

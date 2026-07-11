@@ -57,21 +57,26 @@ internal class BufferedPoller(
         if (!running.compareAndSet(false, true)) throw PollerAlreadyRunning("$instanceId already running")
         job = scope.launch {
             try {
-                Many.interval(pollInterval)
-                    .onBackpressureDrop()
-                    .concatMap { _ ->
-                        client.poll().retry(retryPolicy).asMany()
-                            .doOnNext { records -> if (records.isNotEmpty()) log.kafka.polled(instanceId, records.size) }
-                            .concatMap { records ->
-                                One.defer { records.forEach { buffer.offer(it) }; records }.asMany()
-                            }
+                while (running.get()) {
+                    val result = client.poll(pollInterval).retry(retryPolicy).get()
+                    if (result is se.oyabun.aelv.Either.Left) {
+                        val records = result.value
+                        if (records.isNotEmpty()) {
+                            log.kafka.polled(instanceId, records.size)
+                            records.forEach { buffer.offer(it) }
+                        }
                     }
-                    .retry(retryPolicy)
-                    .takeUntilOther(shutdownSink.asMany())
-                    .drain({}, { signalCompletion(it) }, { signalCompletion() })
+                }
+                signalCompletion()
             } catch (e: Exception) {
                 signalCompletion(e)
             }
+        }
+        scope.launch {
+            shutdownSink.asMany().first()
+            running.set(false)
+            job?.cancelAndJoin()
+            signalCompletion()
         }
     }
 

@@ -1,45 +1,46 @@
 [versions]
 
-kotlin = "2.4.0"
-jvm = "21"
-aelv = "1.0.0-rc.1"
-coroutines = "1.10.2"
-kafka_clients = "3.9.2"
-kotlin_logging = "3.0.5"
-logback_classic = "1.5.17"
+kotlin           = "2.4.0"
+jvm              = "21"
+aelv             = "1.0.0-rc.2"
+coroutines       = "1.10.2"
+kafka_clients    = "3.9.2"
+kotlin_logging   = "3.0.5"
+logback_classic  = "1.5.17"
 logstash_encoder = "8.1"
-testcontainers = "2.0.5"
-dokka = "2.2.0"
+testcontainers   = "2.0.5"
+dokka            = "2.2.0"
+jmh              = "1.37"
+spring_kafka     = "3.3.7"
+vertx_kafka      = "4.5.14"
+mutiny           = "2.8.0"
 
 [libraries]
-kafka_clients    = { group = "org.apache.kafka",         name = "kafka-clients",           version.ref = "kafka_clients" }
-aelv             = { group = "se.oyabun",                name = "aelv",                    version.ref = "aelv" }
-coroutines_core  = { group = "org.jetbrains.kotlinx",    name = "kotlinx-coroutines-core", version.ref = "coroutines" }
-kotlin_logging   = { group = "io.github.microutils",     name = "kotlin-logging",          version.ref = "kotlin_logging" }
-logback_classic  = { group = "ch.qos.logback",           name = "logback-classic",         version.ref = "logback_classic" }
-logstash_encoder = { group = "net.logstash.logback",     name = "logstash-logback-encoder", version.ref = "logstash_encoder" }
-
-kotlin_test          = { group = "org.jetbrains.kotlin", name = "kotlin-test",       version.ref = "kotlin" }
-kotlin_test_junit5   = { group = "org.jetbrains.kotlin", name = "kotlin-test-junit5", version.ref = "kotlin" }
-coroutines_test      = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
-testcontainer_kafka  = { group = "org.testcontainers",   name = "testcontainers-kafka", version.ref = "testcontainers" }
+kafka_clients        = { group = "org.apache.kafka",             name = "kafka-clients",               version.ref = "kafka_clients" }
+aelv                 = { group = "se.oyabun",                    name = "aelv",                        version.ref = "aelv" }
+coroutines_core      = { group = "org.jetbrains.kotlinx",        name = "kotlinx-coroutines-core",     version.ref = "coroutines" }
+kotlin_logging       = { group = "io.github.microutils",         name = "kotlin-logging",              version.ref = "kotlin_logging" }
+logback_classic      = { group = "ch.qos.logback",               name = "logback-classic",             version.ref = "logback_classic" }
+logstash_encoder     = { group = "net.logstash.logback",         name = "logstash-logback-encoder",    version.ref = "logstash_encoder" }
+kotlin_test          = { group = "org.jetbrains.kotlin",         name = "kotlin-test",                 version.ref = "kotlin" }
+kotlin_test_junit5   = { group = "org.jetbrains.kotlin",         name = "kotlin-test-junit5",          version.ref = "kotlin" }
+coroutines_test      = { group = "org.jetbrains.kotlinx",        name = "kotlinx-coroutines-test",     version.ref = "coroutines" }
+testcontainers_kafka = { group = "org.testcontainers",           name = "testcontainers-kafka",                version.ref = "testcontainers" }
+jmh_core             = { group = "org.openjdk.jmh",             name = "jmh-core",                    version.ref = "jmh" }
+jmh_annprocess       = { group = "org.openjdk.jmh",             name = "jmh-generator-annprocess",    version.ref = "jmh" }
+spring_kafka         = { group = "org.springframework.kafka",    name = "spring-kafka",                version.ref = "spring_kafka" }
+vertx_kafka          = { group = "io.vertx",                     name = "vertx-kafka-client",          version.ref = "vertx_kafka" }
+mutiny               = { group = "io.smallrye.reactive",         name = "mutiny",                      version.ref = "mutiny" }
 
 [bundles]
-logging = [
-    "kotlin_logging"
-]
-test = [
-    "kotlin_test",
-    "kotlin_test_junit5",
-    "logback_classic",
-    "logstash_encoder",
-    "coroutines_test",
-    "testcontainer_kafka"
-]
+logging = ["kotlin_logging"]
+test    = ["kotlin_test", "kotlin_test_junit5", "logback_classic", "logstash_encoder", "coroutines_test", "testcontainers_kafka"]
+jmh     = ["jmh_core", "spring_kafka", "vertx_kafka", "mutiny", "kafka_clients", "aelv", "coroutines_core", "testcontainers_kafka"]
 
 [plugins]
-kotlin-jvm    = { id = "org.jetbrains.kotlin.jvm",              version.ref = "kotlin" }
-mavenPublish  = { id = "maven-publish" }
-dokka         = { id = "org.jetbrains.dokka",                   version.ref = "dokka" }
-signing       = { id = "signing" }
-nexusPublish  = { id = "io.github.gradle-nexus.publish-plugin", version = "2.0.0" }
+kotlin-jvm   = { id = "org.jetbrains.kotlin.jvm",              version.ref = "kotlin" }
+mavenPublish = { id = "maven-publish" }
+dokka        = { id = "org.jetbrains.dokka",                    version.ref = "dokka" }
+signing      = { id = "signing" }
+nexusPublish = { id = "io.github.gradle-nexus.publish-plugin", version = "2.0.0" }
+jmh          = { id = "me.champeau.jmh",                        version = "0.7.3" }

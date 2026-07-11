@@ -12,7 +12,7 @@ import kotlinx.coroutines.newSingleThreadContext
 import se.oyabun.aelv.Many
 import se.oyabun.aelv.None
 import se.oyabun.aelv.Policy
-import se.oyabun.aelv.Sink
+import se.oyabun.aelv.Sinks
 import se.oyabun.aelv.asMany
 import se.oyabun.aelv.bufferTimeout
 import se.oyabun.aelv.concatMap
@@ -52,8 +52,8 @@ internal class BufferedCommitter(
 ) : Committer {
 
     private val processedOffsetsRef = AtomicReference<Offsets>(emptyMap())
-    private val positionSink        = Sink.replay<Position>()
-    private val doneSink            = Sink.broadcast<Unit>()
+    private val positionSink        = Sinks.replay<Position>()
+    private val doneSink            = Sinks.broadcast<Unit>()
     private val running             = AtomicBoolean(false)
     private val dispatcher          = newSingleThreadContext("$instanceId-committer")
     private val scope               = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -71,7 +71,7 @@ internal class BufferedCommitter(
             val offset = maxOf(current[position.partition] ?: 0L, position.offset + 1)
             current + (position.partition to offset)
         }
-        positionSink.emit(position)
+        positionSink.tryEmit(position)
     }
 
     override fun start() {

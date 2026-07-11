@@ -5,7 +5,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.assertThrows
 import se.oyabun.aelv.drain
-import se.oyabun.aelv.Sink
+import se.oyabun.aelv.Sinks
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -22,8 +22,8 @@ class BufferedPollerTest {
         val buffer = InMemoryReceivedBuffer(highWaterMark = 500, onPause = { pauseLatch.countDown() })
         val topicPartition = Partition(0, Topic("test"))
         val assignments = java.util.concurrent.atomic.AtomicReference(setOf(topicPartition))
-        val shutdownSink = Sink.broadcast<Unit>()
-        val doneSink = Sink.broadcast<Unit>()
+        val shutdownSink = Sinks.broadcast<Unit>()
+        val doneSink = Sinks.broadcast<Unit>()
 
         runBlocking { repeat(495) { buffer.offer(received(topicPartition)) } }
         client.queuePollResults((1..10).map { received(topicPartition) })
@@ -82,8 +82,8 @@ class BufferedPollerTest {
     @Test
     fun `signals done on pipeline completion`() {
         val client = FakeKafkaClient()
-        val shutdownSink = Sink.broadcast<Unit>()
-        val doneSink = Sink.broadcast<Unit>()
+        val shutdownSink = Sinks.broadcast<Unit>()
+        val doneSink = Sinks.broadcast<Unit>()
         val buffer = InMemoryReceivedBuffer()
         val assignments = java.util.concurrent.atomic.AtomicReference(setOf(Partition(0, Topic("test"))))
 
@@ -151,8 +151,8 @@ class BufferedPollerTest {
             assignments = { assignments.get() },
             instanceId = "test",
             pollInterval = 100.milliseconds,
-            shutdownSink = Sink.broadcast(),
-            doneSink = Sink.broadcast(),
+            shutdownSink = Sinks.broadcast(),
+            doneSink = Sinks.broadcast(),
             log = Logging.logger { },
         )
     }

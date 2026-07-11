@@ -1,6 +1,12 @@
 # prozess
 
-Reactive Kafka consumer/producer built on Reactor and kotlinx-coroutines.
+Reactive Kafka consumer/producer built on [aelv](https://github.com/OyabunAB/aelv) and kotlinx-coroutines.
+
+## Performance
+
+See [BENCHMARKS.md](BENCHMARKS.md) for a full comparison against raw `kafka-clients`,
+Spring Kafka, and Vert.x Kafka covering throughput, concurrent handler execution,
+grouped/ordered processing, and memory pressure under backpressure.
 
 ## Consumer Architecture
 

@@ -78,6 +78,8 @@ data class ConsumerConfig(
     val maxPartitionFetchBytes: Int = 10_000_000,
     val isolationLevel: ConsumerConfig.IsolationLevel = ConsumerConfig.IsolationLevel.ReadUncommitted,
     val security: SecurityProtocol = SecurityProtocol.Plaintext,
+    val commitBatchSize: Int = 25,
+    val commitBatchTimeout: Duration = 1.seconds,
 ) {
     constructor(bootstrapServers: String, groupId: String, vararg topics: String) : this(
         bootstrapServers = bootstrapServers,

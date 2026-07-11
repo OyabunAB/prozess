@@ -4,7 +4,8 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
 import se.oyabun.aelv.Many
 import se.oyabun.aelv.None
-import se.oyabun.aelv.Sink
+import se.oyabun.aelv.BroadcastSink
+import se.oyabun.aelv.Sinks
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -132,7 +133,7 @@ class ShutdownCoordinatorTest {
         override fun close(timeout: Duration) = onClose()
     }
 
-    private fun closeSignal(): Sink<Unit> = Sink.broadcast()
+    private fun closeSignal(): BroadcastSink<Unit> = Sinks.broadcast()
 
     companion object {
         fun testPoller(onStop: () -> Unit = {}): Poller = object : Poller {

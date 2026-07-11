@@ -5,7 +5,7 @@ import se.oyabun.aelv.Many
 import se.oyabun.aelv.None
 import se.oyabun.aelv.One
 import se.oyabun.aelv.Policy
-import se.oyabun.aelv.Sink
+import se.oyabun.aelv.Sinks
 import se.oyabun.aelv.concatMap
 import se.oyabun.aelv.delaySubscription
 import se.oyabun.aelv.doOnError
@@ -43,8 +43,8 @@ class StreamingConsumer<M : Any>(
     private val log        = Logging.logger { }
     private val instanceId = "[$instance ${config.topics} consumer]"
 
-    private val eventSink   = Sink.replay<ConsumerEvent>()
-    private val closeSignal = Sink.broadcast<Unit>()
+    private val eventSink   = Sinks.replay<ConsumerEvent>()
+    private val closeSignal = Sinks.broadcast<Unit>()
     private val disposed    = java.util.concurrent.atomic.AtomicBoolean(false)
 
     private val ends         = AtomicReference<Positions>(emptySet())
@@ -76,15 +76,17 @@ class StreamingConsumer<M : Any>(
     )
 
     private val committer: Committer = BufferedCommitter(
-        client      = client,
-        instanceId  = instanceId,
-        assignments = partitionManager::assignments,
-        log         = log,
-        bufferSize  = config.maxPollRecords,
+        client        = client,
+        instanceId    = instanceId,
+        assignments   = partitionManager::assignments,
+        log           = log,
+        bufferSize    = config.maxPollRecords,
+        maxBatchSize  = config.commitBatchSize,
+        maxBatchTime  = config.commitBatchTimeout,
     )
 
-    private val pollerShutdown = Sink.broadcast<Unit>()
-    private val pollingDone    = Sink.broadcast<Unit>()
+    private val pollerShutdown = Sinks.broadcast<Unit>()
+    private val pollingDone    = Sinks.broadcast<Unit>()
 
     private val poller: Poller = BufferedPoller(
         client       = client,
@@ -148,7 +150,7 @@ class StreamingConsumer<M : Any>(
     }
 
     private fun emitEvent(event: ConsumerEvent) {
-        eventSink.emit(event)
+        eventSink.tryEmit(event)
         eventCallbacks.forEach { it(event) }
     }
 
