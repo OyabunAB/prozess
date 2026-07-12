@@ -5,8 +5,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.flow.consumeAsFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.newSingleThreadContext
 import se.oyabun.aelv.Many
@@ -23,7 +21,8 @@ import se.oyabun.aelv.flatMapMany
 import se.oyabun.aelv.publishOn
 import se.oyabun.aelv.retry
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.concurrent.atomics.AtomicReference
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.atomics.AtomicReference as KAtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.concurrent.atomics.update
 import kotlin.time.Clock
@@ -51,13 +50,14 @@ internal class BufferedCommitter(
     private val maxBatchTime: kotlin.time.Duration = 1.seconds,
 ) : Committer {
 
-    private val processedOffsetsRef = AtomicReference<Offsets>(emptyMap())
+    private val processedOffsetsRef = KAtomicReference<Offsets>(emptyMap())
     private val positionSink        = Sinks.replay<Position>()
     private val doneSink            = Sinks.broadcast<Unit>()
     private val running             = AtomicBoolean(false)
     private val dispatcher          = newSingleThreadContext("$instanceId-committer")
     private val scope               = CoroutineScope(Dispatchers.Default + SupervisorJob())
-    private var job: Job?           = null
+    private val noopJob             = Job().also { it.cancel() }
+    private val job                 = AtomicReference<Job>(noopJob)
 
     override val processedOffsets: Offsets get() = processedOffsetsRef.load()
     override val positions: Many<Position>  get() = positionSink.asMany()
@@ -76,7 +76,7 @@ internal class BufferedCommitter(
 
     override fun start() {
         if (!running.compareAndSet(false, true)) throw CommitterAlreadyRunning("$instanceId already running")
-        job = scope.launch {
+        job.set(scope.launch {
             positionSink.asMany()
                 .bufferTimeout(maxBatchSize, maxBatchTime)
                 .publishOn(dispatcher)
@@ -94,14 +94,14 @@ internal class BufferedCommitter(
                 }
                 .retry(Policy.retry().withBackoff(500.milliseconds, 30.seconds))
                 .drain({}, { signalCompletion(it) }, { signalCompletion() })
-        }
+        })
     }
 
     override fun stop(): None<Unit> = None.defer {
         if (!running.get()) return@defer
         positionSink.complete()
         None.from(doneSink.asMany()).await()
-        job?.cancelAndJoin()
+        job.get().cancelAndJoin()
         running.set(false)
     }
 

@@ -8,22 +8,17 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import se.oyabun.aelv.Many
+import se.oyabun.aelv.Failure
 import se.oyabun.aelv.None
-import se.oyabun.aelv.One
 import se.oyabun.aelv.Policy
 import se.oyabun.aelv.Sink
-import se.oyabun.aelv.Failure
 import se.oyabun.aelv.Success
 import se.oyabun.aelv.await
-import se.oyabun.aelv.concatMap
-import se.oyabun.aelv.doOnNext
-import se.oyabun.aelv.drain
 import se.oyabun.aelv.first
-import se.oyabun.aelv.onBackpressureDrop
 import se.oyabun.aelv.retry
 import se.oyabun.aelv.takeUntilOther
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
@@ -50,7 +45,8 @@ internal class BufferedPoller(
 
     private val running = AtomicBoolean(false)
     private val scope   = CoroutineScope(Dispatchers.Default + SupervisorJob())
-    private var job: Job? = null
+    private val noopJob = Job().also { it.cancel() }
+    private val job     = AtomicReference<Job>(noopJob)
 
     private val retryPolicy = Policy.retry()
         .withBackoff(500.milliseconds, 30.seconds)
@@ -58,10 +54,7 @@ internal class BufferedPoller(
 
     override fun start() {
         if (!running.compareAndSet(false, true)) throw PollerAlreadyRunning("$instanceId already running")
-        val exceptionHandler = CoroutineExceptionHandler { _, cause ->
-            signalCompletion(cause)
-        }
-        job = scope.launch(exceptionHandler) {
+        job.set(scope.launch(CoroutineExceptionHandler { _, cause -> signalCompletion(cause) }) {
             while (running.get()) {
                 val result = client.poll(pollInterval).retry(retryPolicy).await()
                 if (result is Success) {
@@ -73,11 +66,11 @@ internal class BufferedPoller(
                 }
             }
             signalCompletion()
-        }
+        })
         scope.launch {
             shutdownSink.asMany().first()
             running.set(false)
-            job?.cancelAndJoin()
+            job.get().cancelAndJoin()
             signalCompletion()
         }
     }
@@ -86,7 +79,7 @@ internal class BufferedPoller(
         if (!running.get()) return@defer
         shutdownSink.complete()
         None.from(doneSink.asMany()).await()
-        job?.cancelAndJoin()
+        job.get().cancelAndJoin()
         running.set(false)
     }
 
