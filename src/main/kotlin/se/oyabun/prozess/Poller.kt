@@ -12,11 +12,12 @@ import se.oyabun.aelv.None
 import se.oyabun.aelv.One
 import se.oyabun.aelv.Policy
 import se.oyabun.aelv.Sink
+import se.oyabun.aelv.Success
+import se.oyabun.aelv.await
 import se.oyabun.aelv.concatMap
 import se.oyabun.aelv.doOnNext
 import se.oyabun.aelv.drain
 import se.oyabun.aelv.first
-import se.oyabun.aelv.get
 import se.oyabun.aelv.onBackpressureDrop
 import se.oyabun.aelv.retry
 import se.oyabun.aelv.takeUntilOther
@@ -58,8 +59,8 @@ internal class BufferedPoller(
         job = scope.launch {
             try {
                 while (running.get()) {
-                    val result = client.poll(pollInterval).retry(retryPolicy).get()
-                    if (result is se.oyabun.aelv.Either.Left) {
+                    val result = client.poll(pollInterval).retry(retryPolicy).await()
+                    if (result is Success) {
                         val records = result.value
                         if (records.isNotEmpty()) {
                             log.kafka.polled(instanceId, records.size)
@@ -91,13 +92,13 @@ internal class BufferedPoller(
     override fun pause() {
         if (!running.get()) throw PollerNotRunning("$instanceId is not running")
         val current = assignments()
-        if (current.isNotEmpty()) runBlocking { client.pause(current).get() }
+        if (current.isNotEmpty()) runBlocking { client.pause(current).await() }
     }
 
     override fun resume() {
         if (!running.get()) throw PollerNotRunning("$instanceId is not running")
         val current = assignments()
-        if (current.isNotEmpty()) runBlocking { client.resume(current).get() }
+        if (current.isNotEmpty()) runBlocking { client.resume(current).await() }
     }
 
     override val isRunning: Boolean get() = running.get()

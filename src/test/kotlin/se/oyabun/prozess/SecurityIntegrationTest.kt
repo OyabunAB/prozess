@@ -13,7 +13,9 @@ import org.junit.jupiter.api.TestInstance.Lifecycle
 import org.junit.jupiter.api.Timeout
 import org.testcontainers.kafka.KafkaContainer
 import org.testcontainers.utility.MountableFile
-import se.oyabun.aelv.get
+import se.oyabun.aelv.await
+import se.oyabun.aelv.Failure
+import se.oyabun.aelv.Success
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -172,7 +174,7 @@ class SecurityIntegrationTest {
             security = security,
         )
         val producer = StreamingProducer<String>(producerConfig) { it.toByteArray() }
-        runBlocking { producer.send("key", message).get() }
+        runBlocking { producer.send("key", message).await() }
         runBlocking { producer.close().await() }
 
         // Consume

@@ -94,7 +94,7 @@ class DefaultProcessor<M : Any> private constructor(
             val log    = Logging.logger { }
 
             fun processBatch(messages: List<Received>): Many<Position> =
-                Many.of(messages)
+                Many.from(messages)
                     .flatMap { received: Received ->
                         One.defer {
                             when (val result = deserializer(received)) {
@@ -108,11 +108,11 @@ class DefaultProcessor<M : Any> private constructor(
                     .flatMapMany { items: List<BatchItem<M>> ->
                         val processables: List<Processable<M>> = items.mapNotNull { it.processable }
                         val acks: List<Position>               = items.mapNotNull { it.ack }
-                        if (processables.isEmpty()) return@flatMapMany Many.of(acks)
+                        if (processables.isEmpty()) return@flatMapMany Many.from(acks)
                         One.defer {
                             handler(processables)
                             processables.map { it.received.position } + acks
-                        }.retry(policy).flatMapMany { positions: List<Position> -> Many.of(positions.sortedBy { p -> p.offset }) }
+                        }.retry(policy).flatMapMany { positions: List<Position> -> Many.from(positions.sortedBy { p -> p.offset }) }
                     }
 
             return DefaultProcessor { partition ->
@@ -211,7 +211,7 @@ class DefaultProcessor<M : Any> private constructor(
                                         One.defer {
                                             handler(key.key, batch)
                                             batch.map { p -> p.received.position }
-                                        }.retry(policy).flatMapMany { positions: List<Position> -> Many.of(positions) }
+                                        }.retry(policy).flatMapMany { positions: List<Position> -> Many.from(positions) }
                                     }
                             }
                         },

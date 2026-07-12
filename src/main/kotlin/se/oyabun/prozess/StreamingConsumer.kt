@@ -19,7 +19,9 @@ import se.oyabun.aelv.merge
 import se.oyabun.aelv.retry
 import se.oyabun.aelv.take
 import se.oyabun.aelv.takeUntilOther
-import se.oyabun.aelv.get
+import se.oyabun.aelv.await
+import se.oyabun.aelv.Failure
+import se.oyabun.aelv.Success
 import se.oyabun.aelv.groupBy
 import se.oyabun.aelv.zip
 import se.oyabun.prozess.EndOffset.CatchUp
@@ -63,8 +65,8 @@ class StreamingConsumer<M : Any>(
     private val buffer = InMemoryReceivedBuffer(
         highWaterMark = config.maxPollRecords,
         lowWaterMark  = config.maxPollRecords / 4,
-        onPause  = { val current = partitionManager.assignments(); if (current.isNotEmpty()) runBlocking { client.pause(current).get() } },
-        onResume = { val current = partitionManager.assignments(); if (current.isNotEmpty()) runBlocking { client.resume(current).get() } },
+        onPause  = { val current = partitionManager.assignments(); if (current.isNotEmpty()) runBlocking { client.pause(current).await() } },
+        onResume = { val current = partitionManager.assignments(); if (current.isNotEmpty()) runBlocking { client.resume(current).await() } },
     )
 
     private val partitionManager = CoordinatingPartitionManager(
@@ -190,19 +192,19 @@ class StreamingConsumer<M : Any>(
     private fun initOffsets(topicPartitions: Partitions, from: StartOffset, until: EndOffset): One<Positions> {
         val loadEndings: One<Positions> = if (until is CatchUp)
             client.endOffsets(topicPartitions).map { it.also { e -> ends.store(e) } }
-        else One.of(emptySet())
+        else One.single(emptySet())
 
         val loadBeginnings: One<Positions> = when (from) {
             is Earliest -> client.committed(topicPartitions).flatMap { committed ->
                 val unseeded = topicPartitions.filter { it !in committed }.toSet()
-                if (unseeded.isEmpty()) One.of(emptySet())
+                if (unseeded.isEmpty()) One.single(emptySet())
                 else client.beginningOffsets(unseeded).map { beginnings ->
                     val targets = beginnings.asOffsets()
                     if (targets.isNotEmpty()) pendingSeeks.store(targets)
                     beginnings
                 }
             }
-            is Latest -> One.of(emptySet())
+            is Latest -> One.single(emptySet())
             is AtTimestamp -> client.offsetsForTimes(topicPartitions, from.instant).flatMap { positions ->
                 if (positions.isEmpty())
                     client.endOffsets(topicPartitions).map { endOffsets ->
@@ -210,7 +212,7 @@ class StreamingConsumer<M : Any>(
                         if (targets.isNotEmpty()) pendingSeeks.store(targets)
                         endOffsets
                     }
-                else zip(One.of(positions.asOffsets()), client.committed(topicPartitions)) { targets, committed ->
+                else zip(One.single(positions.asOffsets()), client.committed(topicPartitions)) { targets, committed ->
                     val filtered = targets.filterKeys { p ->
                         val known = committed[p]
                         known == null || known <= (targets[p] ?: 0L)
@@ -227,7 +229,7 @@ class StreamingConsumer<M : Any>(
             from is AtTimestamp && until is CatchUp -> loadBeginnings.flatMap { loadEndings }
             until is CatchUp                        -> loadEndings
             from is AtTimestamp                     -> loadBeginnings
-            else                                    -> One.of(emptySet())
+            else                                    -> One.single(emptySet())
         }
     }
 
@@ -248,14 +250,20 @@ class StreamingConsumer<M : Any>(
     fun hasNoAssignments(): Boolean = partitionManager.assignments().isEmpty()
 
     fun position(partition: Partition): Long =
-        runBlocking { client.positionOf(partition).get() }
-            .leftOrNull() ?: throw ConsumerNotActive("$instanceId position() failed for $partition")
+        when (val result = runBlocking { client.positionOf(partition).await() }) {
+            is Success -> result.value
+            is Failure -> throw ConsumerNotActive("$instanceId position() failed for $partition")
+        }
 
     fun lag(partition: Partition): Long = runBlocking {
-        val end = client.endOffsetOf(partition).get().leftOrNull()
-            ?: throw ConsumerNotActive("$instanceId lag() failed for $partition")
-        val pos = client.positionOf(partition).get().leftOrNull()
-            ?: throw ConsumerNotActive("$instanceId lag() failed for $partition")
+        val end = when (val result = client.endOffsetOf(partition).await()) {
+            is Success -> result.value
+            is Failure -> throw ConsumerNotActive("$instanceId lag() failed for $partition")
+        }
+        val pos = when (val result = client.positionOf(partition).await()) {
+            is Success -> result.value
+            is Failure -> throw ConsumerNotActive("$instanceId lag() failed for $partition")
+        }
         end - pos
     }
 }

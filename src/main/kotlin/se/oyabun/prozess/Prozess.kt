@@ -1,7 +1,9 @@
 package se.oyabun.prozess
 
 import kotlinx.coroutines.runBlocking
-import se.oyabun.aelv.get
+import se.oyabun.aelv.Failure
+import se.oyabun.aelv.Success
+import se.oyabun.aelv.await
 import kotlin.time.Duration
 
 object Prozess {
@@ -83,8 +85,11 @@ object Prozess {
     ): Producer<M> = object : Producer<M> {
         val delegate = StreamingProducer(config, instance, serializer)
         override fun send(key: String, value: M, partition: Int?, timestamp: Long?, headers: Headers): Long {
-            val result = runBlocking { delegate.send(key, value, partition, timestamp, headers).get() }
-            return result.leftOrNull() ?: throw SendFailure("$instance send failed", RuntimeException(result.rightOrNull()?.message))
+            val result = runBlocking { delegate.send(key, value, partition, timestamp, headers).await() }
+            return when (result) {
+                is Success -> result.value
+                is Failure -> throw SendFailure("$instance send failed", RuntimeException(result.value.message))
+            }
         }
         override fun sendOffsetsToTransaction(offsets: Offsets, member: GroupMember) { runBlocking { delegate.sendOffsetsToTransaction(offsets, member).await() } }
         override fun initTransactions()  { runBlocking { delegate.initTransactions().await() } }
@@ -94,7 +99,6 @@ object Prozess {
         override fun close()             { runBlocking { delegate.close().await() } }
     }
 
-    /** Builds a [Consumer] by configuring the processing pipeline. */
     class ConsumerBuilder<M : Any>(
         private val config: ConsumerConfig,
         private val deserializer: Deserializer<M>,
@@ -138,7 +142,6 @@ object Prozess {
             wrap(config, processor, instance)
     }
 
-    /** Builds a [Consumer] that groups messages by a key for per-key ordered processing. */
     class GroupedConsumerBuilder<K : Any, M : Any>(
         private val config: ConsumerConfig,
         private val deserializer: Deserializer<M>,

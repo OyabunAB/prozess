@@ -36,7 +36,7 @@ class StreamingKafkaTests {
             val config = ProducerConfig(bootstrapServers, Topic(topic))
             val producer = StreamingProducer<String>(config) { it.toByteArray() }
             val messages = (1..10).map { "msg-$it" }
-            Verify.that(producer.sendAll(Many.of(messages), key = { it }).toList())
+            Verify.that(producer.sendAll(Many.from(messages), key = { it }).toList())
                 .matchesNext { assertTrue(it.containsAll(messages)) }
                 .completesNormally()
             runBlocking { producer.close().await() }
@@ -50,7 +50,7 @@ class StreamingKafkaTests {
             val payload = "hello"
             val keyExtractor: Prozess.KeyExtraction<String> = { it }
             val headerProvider: Prozess.HeadersProvider<String> = { listOf(Header("trace-id", "${it}-123".toByteArray())) }
-            runBlocking { producer.sendAll(Many.of(payload), keyExtractor, headerProvider).last() }
+            runBlocking { producer.sendAll(Many.items(payload), keyExtractor, headerProvider).last() }
             runBlocking { producer.close().await() }
 
             val receivedHeaders = mutableListOf<Headers>()

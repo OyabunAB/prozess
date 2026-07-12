@@ -4,10 +4,12 @@ import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
 import se.oyabun.aelv.Sinks
-import se.oyabun.aelv.get
-import se.oyabun.aelv.Verify
-import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
+import se.oyabun.aelv.Success
+import se.oyabun.aelv.Failure
+import se.oyabun.aelv.Verify
+import se.oyabun.aelv.await
+import kotlin.test.assertIs
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
@@ -54,7 +56,7 @@ class FakeKafkaClientTest {
         val client = FakeKafkaClient()
         val offsets = mapOf(p0 to 10L)
 
-        runBlocking { client.commit(offsets, "test-meta").get() }
+        runBlocking { client.commit(offsets, "test-meta").await() }
 
         assertEquals(1, client.commits.size)
         assertEquals(offsets, client.commits.peek().first)
@@ -71,7 +73,7 @@ class FakeKafkaClientTest {
             override fun onPartitionsAssigned(context: RebalanceContext, partitions: Partitions) { assigned.add(partitions) }
         }
 
-        runBlocking { client.subscribe(setOf("test"), listener).get() }
+        runBlocking { client.subscribe(setOf("test"), listener).await() }
 
         assertEquals(setOf("test"), client.subscribedTopics)
         assertEquals(1, assigned.size)
@@ -126,9 +128,9 @@ class FakeKafkaClientTest {
         val client = FakeKafkaClient()
         client.setPartitionsFor("test", setOf(p0, p1))
 
-        val result = runBlocking { client.partitionsFor(setOf("test")).get().leftOrNull()!! }
-
-        assertEquals(setOf(p0, p1), result)
+        val outcome = runBlocking { client.partitionsFor(setOf("test")).await() }
+        assertIs<Success<Partitions>>(outcome)
+        assertEquals(setOf(p0, p1), outcome.value)
     }
 
     // ---- Component wiring using FakeKafkaClient ----

@@ -4,15 +4,19 @@ import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
 import se.oyabun.aelv.Many
-import se.oyabun.aelv.get
+import java.util.concurrent.TimeUnit
+import se.oyabun.aelv.Success
+import se.oyabun.aelv.Failure
+import se.oyabun.aelv.Verify
+import se.oyabun.aelv.await
 import se.oyabun.aelv.last
 import se.oyabun.aelv.take
 import se.oyabun.aelv.toList
-import se.oyabun.aelv.Verify
-import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.test.fail
 import se.oyabun.prozess.Prozess.DeserializationResult
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
@@ -37,7 +41,7 @@ class ProcessorTest {
             },
             handler = {},
         )
-        val messages = Many.of(received(p0, 0), received(p0, 1), received(p0, 2))
+        val messages = Many.items(received(p0, 0), received(p0, 1), received(p0, 2))
 
         Verify.that(processor.process(messages))
             .emitsNext(Position(p0, 0))
@@ -58,7 +62,7 @@ class ProcessorTest {
             },
             handler = { p -> processed.add(p.value) },
         )
-        val messages = Many.of(received(p0, 0, "hello"), received(p0, 1, "world"))
+        val messages = Many.items(received(p0, 0, "hello"), received(p0, 1, "world"))
 
         runBlocking { processor.process(messages).last() }
 
@@ -81,7 +85,7 @@ class ProcessorTest {
             },
             retryConfig = RetryConfig(minBackoff = 10.milliseconds),
         )
-        Verify.that(processor.process(Many.of(received(p0, 0))))
+        Verify.that(processor.process(Many.items(received(p0, 0))))
             .emitsNext(Position(p0, 0))
             .completesNormally()
 
@@ -101,7 +105,7 @@ class ProcessorTest {
             batchSize = 3,
             batchDuration = 10.seconds,
         )
-        val messages = Many.of(
+        val messages = Many.items(
             received(p0, 0), received(p0, 1), received(p0, 2),
             received(p0, 3), received(p0, 4),
         )
@@ -126,7 +130,7 @@ class ProcessorTest {
             batchSize = 2,
             batchDuration = 10.seconds,
         )
-        val messages = Many.of(received(p0, 0, "a"), received(p0, 1, "b"), received(p0, 2, "c"))
+        val messages = Many.items(received(p0, 0, "a"), received(p0, 1, "b"), received(p0, 2, "c"))
 
         runBlocking { processor.process(messages).last() }
 
@@ -147,7 +151,7 @@ class ProcessorTest {
             batchSize = 10,
             batchDuration = 50.milliseconds,
         )
-        val messages = Many.of(received(p0, 0, "a"))
+        val messages = Many.items(received(p0, 0, "a"))
 
         Verify.that(processor.process(messages))
             .emitsNext(Position(p0, 0))
@@ -175,7 +179,7 @@ class ProcessorTest {
             batchDuration = 10.seconds,
             retryConfig = RetryConfig(minBackoff = 10.milliseconds),
         )
-        Verify.that(processor.process(Many.of(received(p0, 0, "a"), received(p0, 1, "b"))))
+        Verify.that(processor.process(Many.items(received(p0, 0, "a"), received(p0, 1, "b"))))
             .emitsNext(Position(p0, 0), Position(p0, 1))
             .completesNormally()
         assertEquals(2, attempts)
@@ -253,7 +257,7 @@ class ProcessorTest {
             keyExtractor = { p -> p.value },
             handler = { key, p -> processed.add("$key:${p.value}") },
         )
-        val messages = Many.of(
+        val messages = Many.items(
             received(p0, 0, "a"),
             received(p0, 1, "b"),
             received(p0, 2, "a"),
@@ -278,14 +282,14 @@ class ProcessorTest {
             keyExtractor = { p -> p.value },
             handler = { _, _ -> },
         )
-        val messages = Many.of(
+        val messages = Many.items(
             received(p0, 0, "a"),
             received(p0, 1, "b"),
             received(p0, 2, "a"),
             received(p0, 3, "b"),
         )
 
-        val lastPosition = runBlocking { processor.process(messages).last().leftOrNull() }
+        val lastPosition = runBlocking { processor.process(messages).last().rightOrNull() }
 
         assertEquals(Position(p0, 3), lastPosition)
     }
@@ -307,7 +311,7 @@ class ProcessorTest {
             },
             retryConfig = RetryConfig(minBackoff = 10.milliseconds),
         )
-        Verify.that(processor.process(Many.of(received(p0, 0, "a"))))
+        Verify.that(processor.process(Many.items(received(p0, 0, "a"))))
             .emitsCount(1)
             .completesNormally()
         assertEquals(2, attempts)
@@ -328,7 +332,7 @@ class ProcessorTest {
             batchSize = 2,
             batchDuration = 10.seconds,
         )
-        val messages = Many.of(
+        val messages = Many.items(
             received(p0, 0, "a"),
             received(p0, 1, "a"),
             received(p0, 2, "b"),
@@ -354,14 +358,14 @@ class ProcessorTest {
             batchSize = 2,
             batchDuration = 10.seconds,
         )
-        val messages = Many.of(
+        val messages = Many.items(
             received(p0, 0, "a"),
             received(p0, 1, "a"),
             received(p0, 2, "b"),
             received(p0, 3, "b"),
         )
 
-        val lastPosition = runBlocking { processor.process(messages).last().leftOrNull() }
+        val lastPosition = runBlocking { processor.process(messages).last().rightOrNull() }
 
         assertEquals(Position(p0, 3), lastPosition)
     }
@@ -381,7 +385,7 @@ class ProcessorTest {
             batchSize = 10,
             batchDuration = 50.milliseconds,
         )
-        Verify.that(processor.process(Many.of(received(p0, 0, "a"))))
+        Verify.that(processor.process(Many.items(received(p0, 0, "a"))))
             .emitsNext(Position(p0, 0))
             .completesNormally()
         assertEquals(1, batches.size)
@@ -403,7 +407,7 @@ class ProcessorTest {
             handler = {},
             retryConfig = RetryConfig(minBackoff = 10.milliseconds),
         )
-        Verify.that(processor.process(Many.of(received(p0, 0))))
+        Verify.that(processor.process(Many.items(received(p0, 0))))
             .emitsNext(Position(p0, 0))
             .completesNormally()
         assertEquals(2, attempts)
@@ -425,7 +429,7 @@ class ProcessorTest {
             handler = { _, _ -> },
             retryConfig = RetryConfig(minBackoff = 10.milliseconds),
         )
-        Verify.that(processor.process(Many.of(received(p0, 0, "a"))))
+        Verify.that(processor.process(Many.items(received(p0, 0, "a"))))
             .emitsCount(1)
             .completesNormally()
         assertEquals(2, attempts, "deserialization is retried inside retry scope")
@@ -491,7 +495,7 @@ class ProcessorTest {
             handler = {},
             maxConcurrency = 4,
         )
-        Verify.that(processor.process(Many.of(received(p0, 0), received(p0, 1))))
+        Verify.that(processor.process(Many.items(received(p0, 0), received(p0, 1))))
             .emitsNext(Position(p0, 0), Position(p0, 1))
             .completesNormally()
     }
@@ -503,7 +507,7 @@ class ProcessorTest {
             deserializer = { DeserializationResult.Tombstone },
             handler = { processed.add(it.value) },
         )
-        Verify.that(processor.process(Many.of(received(p0, 0))))
+        Verify.that(processor.process(Many.items(received(p0, 0))))
             .emitsNext(Position(p0, 0))
             .completesNormally()
         assertEquals(emptyList(), processed)
@@ -516,7 +520,7 @@ class ProcessorTest {
             deserializer = { DeserializationResult.PoisonPill("bad data") },
             handler = { processed.add(it.value) },
         )
-        Verify.that(processor.process(Many.of(received(p0, 0))))
+        Verify.that(processor.process(Many.items(received(p0, 0))))
             .emitsNext(Position(p0, 0))
             .completesNormally()
         assertEquals(emptyList(), processed)
@@ -539,7 +543,7 @@ class ProcessorTest {
             batchSize = 4,
             batchDuration = 10.seconds,
         )
-        Verify.that(processor.process(Many.of(
+        Verify.that(processor.process(Many.items(
             received(p0, 0, "a"),
             received(p0, 1, "b"),
             received(p0, 2, "c"),
@@ -564,11 +568,14 @@ class ProcessorTest {
             handler = { _, p -> processed.add(p.value) },
         )
         val positions = runBlocking {
-            processor.process(Many.of(
+            when (val result = processor.process(Many.items(
                 received(p0, 0, "a"),
                 received(p0, 1, "b"),
                 received(p0, 2, "c"),
-            )).toList().get().leftOrNull()!!
+            )).toList().await()) {
+                is Success -> result.value
+                is Failure -> fail("expected success but got failure: ${result.value}")
+            }
         }
         assertTrue(positions.isNotEmpty())
         assertEquals(Position(p0, 2), positions.last())

@@ -62,15 +62,15 @@ internal class FakeKafkaClient : KafkaClient {
         commitFailuresRemaining++
     }
 
-    override fun partitionsFor(topics: Topics): One<Partitions> = One.of(
+    override fun partitionsFor(topics: Topics): One<Partitions> = One.single(
         topics.flatMap { t -> topicsToPartitions.getOrDefault(t, emptySet()) }.toSet()
     )
 
     override fun beginningOffsets(partitions: Partitions): One<Positions> =
-        One.of(emptySet())
+        One.single(emptySet())
 
     override fun endOffsets(partitions: Partitions): One<Positions> =
-        One.of(emptySet())
+        One.single(emptySet())
 
     override fun subscribe(topics: Topics, listener: RebalanceListener): One<Topics> {
         subscribedTopics = topics
@@ -81,17 +81,17 @@ internal class FakeKafkaClient : KafkaClient {
             listener.onPartitionsAssigned(FakeRebalanceContext(), partitions)
             initialAssignTriggered = true
         }
-        return One.of(topics)
+        return One.single(topics)
     }
 
     override fun offsetsForTimes(partitions: Partitions, timestamp: Instant): One<Positions> =
-        One.of(emptySet())
+        One.single(emptySet())
 
     override fun positionOf(partition: Partition): One<Long> =
-        One.of(positionOfResult(partition))
+        One.single(positionOfResult(partition))
 
     override fun endOffsetOf(partition: Partition): One<Long> =
-        One.of(endOffsetOfResult(partition))
+        One.single(endOffsetOfResult(partition))
 
     override fun poll(timeout: Duration): One<List<Received>> = One.defer {
         if (pollErrorRemaining > 0) {
@@ -105,12 +105,12 @@ internal class FakeKafkaClient : KafkaClient {
 
     override fun pause(partitions: Partitions): One<Partitions> {
         pausedPartitions.add(partitions)
-        return One.of(partitions)
+        return One.single(partitions)
     }
 
     override fun resume(partitions: Partitions): One<Partitions> {
         resumedPartitions.add(partitions)
-        return One.of(partitions)
+        return One.single(partitions)
     }
 
     override fun commit(offsets: Offsets, metadata: String): One<Offsets> = One.defer {
@@ -124,7 +124,7 @@ internal class FakeKafkaClient : KafkaClient {
     }
 
     override fun committed(partitions: Partitions): One<Offsets> =
-        One.of(emptyMap())
+        One.single(emptyMap())
 
     override fun seek(offsets: Offsets): None<Offsets> = None.defer {
         positions.putAll(offsets)

@@ -52,7 +52,7 @@ class StreamingProducer<M : Any>(
         groupHandler = { _, group: Many<M> ->
             group.concatMap { element: M ->
                 send(key(element), element, headers = headersProvider(element))
-                    .flatMapMany { Many.of(element) }
+                    .flatMapMany { Many.items(element) }
             }
         },
     )

@@ -12,7 +12,6 @@ import org.apache.kafka.common.config.SslConfigs
 sealed class SecurityProtocol {
     internal abstract fun toProperties(): Map<String, Any>
 
-    /** No encryption, no authentication. */
     data object Plaintext : SecurityProtocol() {
         override fun toProperties(): Map<String, Any> = mapOf(
             SECURITY_PROTOCOL to "PLAINTEXT",
@@ -92,7 +91,6 @@ data class KeystoreConfig(
     )
 }
 
-/** SASL authentication mechanism. */
 sealed class SaslMechanism {
     internal abstract fun toProperties(): Map<String, Any>
 
