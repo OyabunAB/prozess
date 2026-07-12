@@ -3,6 +3,7 @@ package se.oyabun.prozess
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.Nested
+import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
 import org.junit.jupiter.api.TestInstance.Lifecycle
@@ -17,6 +18,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.seconds
 
+@Tag("integration")
 @TestInstance(Lifecycle.PER_CLASS)
 @Timeout(30)
 class KafkaTests {

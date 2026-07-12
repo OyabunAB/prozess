@@ -10,6 +10,12 @@ import org.testcontainers.kafka.KafkaContainer
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.runBlocking
+import se.oyabun.aelv.await
+import se.oyabun.aelv.filter
+import se.oyabun.aelv.map
+import se.oyabun.aelv.take
+import se.oyabun.aelv.toList
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -33,7 +39,6 @@ class RebalanceKafkaTests {
             val topicName = topic(bootstrapServers, partitions = 2)
             val groupId = groupId()
             val count = 20
-            val published = publish(bootstrapServers, topicName, count = count)
 
             val messagesA = ConcurrentLinkedQueue<String>()
             val messagesB = ConcurrentLinkedQueue<String>()
@@ -53,8 +58,12 @@ class RebalanceKafkaTests {
                 allDone.countDown()
             }
 
+            val assigned = onAssigned(consumerA, consumerB)
             consumerA.start(from = StartOffset.Earliest)
             consumerB.start(from = StartOffset.Earliest)
+            awaitLatch(assigned)
+
+            val published = publish(bootstrapServers, topicName, count = count)
 
             assertTrue(
                 allDone.await(30, TimeUnit.SECONDS),
@@ -65,7 +74,7 @@ class RebalanceKafkaTests {
             consumerB.shutdown()
 
             val allConsumed = messagesA + messagesB
-            assertEquals(published.sorted(), allConsumed.sorted(), "All messages must be consumed at least once")
+            assertEquals(published.sorted(), allConsumed.sorted(), "All messages must be consumed exactly once")
 
             for (msg in messagesA) {
                 assertTrue(msg !in messagesB, "Message $msg was processed by both consumers (duplication)")
@@ -88,11 +97,11 @@ class RebalanceKafkaTests {
                 firstDone.countDown()
                 allDone.countDown()
             }
+            val committed = CountDownLatch(1)
+            consumerA.onEvent(ConsumerEvent.Committed::class) { if (it.offsets.values.sum() >= 10L) committed.countDown() }
             consumerA.start(from = StartOffset.Earliest)
-            assertTrue(
-                firstDone.await(30, TimeUnit.SECONDS),
-                "Consumer A did not process first batch",
-            )
+            assertTrue(firstDone.await(30, TimeUnit.SECONDS), "Consumer A did not process first batch")
+            assertTrue(committed.await(30, TimeUnit.SECONDS), "Offsets not committed to Kafka")
 
             val consumerB = stringConsumer(
                 ConsumerConfig(bootstrapServers, groupId, setOf(topicName)),

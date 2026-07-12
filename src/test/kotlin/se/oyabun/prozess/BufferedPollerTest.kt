@@ -1,24 +1,18 @@
 package se.oyabun.prozess
 
+import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.assertThrows
-import reactor.core.publisher.Sinks
-import reactor.util.retry.Retry
-import se.oyabun.prozess.Logging
-import se.oyabun.prozess.Partition
-import se.oyabun.prozess.PollerAlreadyRunning
-import se.oyabun.prozess.PollerNotRunning
-import se.oyabun.prozess.Position
-import se.oyabun.prozess.Received
-import se.oyabun.prozess.Topic
-import se.oyabun.prozess.InMemoryReceivedBuffer
+import se.oyabun.aelv.drain
+import se.oyabun.aelv.Sinks
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
-import kotlin.time.Duration.Companion.seconds
-import kotlin.time.toJavaDuration
 
+@Timeout(value = 5, unit = TimeUnit.SECONDS)
 class BufferedPollerTest {
 
     @Test
@@ -28,10 +22,10 @@ class BufferedPollerTest {
         val buffer = InMemoryReceivedBuffer(highWaterMark = 500, onPause = { pauseLatch.countDown() })
         val topicPartition = Partition(0, Topic("test"))
         val assignments = java.util.concurrent.atomic.AtomicReference(setOf(topicPartition))
-        val done = Sinks.one<Unit>()
-        val shutdownSink = Sinks.one<Unit>()
+        val shutdownSink = Sinks.broadcast<Unit>()
+        val doneSink = Sinks.broadcast<Unit>()
 
-        repeat(495) { buffer.offer(received(topicPartition)) }
+        runBlocking { repeat(495) { buffer.offer(received(topicPartition)) } }
         client.queuePollResults((1..10).map { received(topicPartition) })
 
         val poller = BufferedPoller(
@@ -41,16 +35,15 @@ class BufferedPollerTest {
             instanceId = "test-poller",
             pollInterval = 10.milliseconds,
             shutdownSink = shutdownSink,
-            done = done,
+            doneSink = doneSink,
             log = Logging.logger { },
-            retryStrategy = Retry.max(1),
         )
 
         try {
             poller.start()
             assertTrue(pauseLatch.await(3, TimeUnit.SECONDS), "Expected pause on buffer saturation")
         } finally {
-            poller.stop().block()
+            runBlocking { poller.stop().await() }
         }
     }
 
@@ -61,7 +54,7 @@ class BufferedPollerTest {
         try {
             assertThrows<PollerAlreadyRunning> { poller.start() }
         } finally {
-            poller.stop().block()
+            runBlocking { poller.stop().await() }
         }
     }
 
@@ -80,15 +73,17 @@ class BufferedPollerTest {
     @Test
     fun `stop is idempotent when not running`() {
         val poller = createPoller()
-        poller.stop().block()
-        poller.stop().block()
+        runBlocking {
+            poller.stop().await()
+            poller.stop().await()
+        }
     }
 
     @Test
     fun `signals done on pipeline completion`() {
         val client = FakeKafkaClient()
-        val done = Sinks.one<Unit>()
-        val shutdownSink = Sinks.one<Unit>()
+        val shutdownSink = Sinks.broadcast<Unit>()
+        val doneSink = Sinks.broadcast<Unit>()
         val buffer = InMemoryReceivedBuffer()
         val assignments = java.util.concurrent.atomic.AtomicReference(setOf(Partition(0, Topic("test"))))
 
@@ -99,16 +94,22 @@ class BufferedPollerTest {
             instanceId = "test-done",
             pollInterval = 10.milliseconds,
             shutdownSink = shutdownSink,
-            done = done,
+            doneSink = doneSink,
             log = Logging.logger { },
-            retryStrategy = Retry.max(1),
+        )
+
+        val signalledLatch = CountDownLatch(1)
+        doneSink.asMany().drain(
+            onNext = { signalledLatch.countDown() },
+            onError = {},
+            onComplete = { signalledLatch.countDown() },
         )
 
         poller.start()
-        shutdownSink.tryEmitValue(Unit)
-        val signalled = done.asMono().timeout(3.seconds.toJavaDuration()).hasElement().block() ?: false
+        shutdownSink.complete()
+        val signalled = signalledLatch.await(3, TimeUnit.SECONDS)
         assertTrue(signalled, "Expected done signal after shutdown")
-        poller.stop().block()
+        runBlocking { poller.stop().await() }
     }
 
     @Test
@@ -118,10 +119,10 @@ class BufferedPollerTest {
             assertTrue(!poller.isRunning, "Should not be running before start")
             poller.start()
             assertTrue(poller.isRunning, "Should be running after start")
-            poller.stop().block()
+            runBlocking { poller.stop().await() }
             assertTrue(!poller.isRunning, "Should not be running after stop")
         } finally {
-            poller.stop().block()
+            runBlocking { poller.stop().await() }
         }
     }
 
@@ -130,13 +131,13 @@ class BufferedPollerTest {
         val p1 = createPoller()
         p1.start()
         assertTrue(p1.isRunning)
-        p1.stop().block()
+        runBlocking { p1.stop().await() }
         assertTrue(!p1.isRunning)
 
         val p2 = createPoller()
         p2.start()
         assertTrue(p2.isRunning)
-        p2.stop().block()
+        runBlocking { p2.stop().await() }
         assertTrue(!p2.isRunning)
     }
 
@@ -150,10 +151,9 @@ class BufferedPollerTest {
             assignments = { assignments.get() },
             instanceId = "test",
             pollInterval = 100.milliseconds,
-            shutdownSink = Sinks.one(),
-            done = Sinks.one(),
+            shutdownSink = Sinks.broadcast(),
+            doneSink = Sinks.broadcast(),
             log = Logging.logger { },
-            retryStrategy = Retry.max(1),
         )
     }
 

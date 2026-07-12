@@ -1,15 +1,27 @@
 package se.oyabun.prozess
 
+import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
-import reactor.core.publisher.Flux
-import reactor.test.StepVerifier
+import org.junit.jupiter.api.Timeout
+import se.oyabun.aelv.Many
+import java.util.concurrent.TimeUnit
+import se.oyabun.aelv.Success
+import se.oyabun.aelv.Failure
+import se.oyabun.aelv.Verify
+import se.oyabun.aelv.await
+import se.oyabun.aelv.last
+import se.oyabun.aelv.take
+import se.oyabun.aelv.toList
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.test.fail
 import se.oyabun.prozess.Prozess.DeserializationResult
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
+@Timeout(value = 5, unit = TimeUnit.SECONDS)
 class ProcessorTest {
 
     private val topic = Topic("test")
@@ -29,13 +41,13 @@ class ProcessorTest {
             },
             handler = {},
         )
-        val messages = Flux.just(received(p0, 0), received(p0, 1), received(p0, 2))
+        val messages = Many.items(received(p0, 0), received(p0, 1), received(p0, 2))
 
-        StepVerifier.create(processor.process(messages))
-            .expectNext(Position(p0, 0))
-            .expectNext(Position(p0, 1))
-            .expectNext(Position(p0, 2))
-            .verifyComplete()
+        Verify.that(processor.process(messages))
+            .emitsNext(Position(p0, 0))
+            .emitsNext(Position(p0, 1))
+            .emitsNext(Position(p0, 2))
+            .completesNormally()
     }
 
     @Test
@@ -50,9 +62,9 @@ class ProcessorTest {
             },
             handler = { p -> processed.add(p.value) },
         )
-        val messages = Flux.just(received(p0, 0, "hello"), received(p0, 1, "world"))
+        val messages = Many.items(received(p0, 0, "hello"), received(p0, 1, "world"))
 
-        processor.process(messages).blockLast()
+        runBlocking { processor.process(messages).last() }
 
         assertEquals(listOf("hello", "world"), processed)
     }
@@ -73,9 +85,9 @@ class ProcessorTest {
             },
             retryConfig = RetryConfig(minBackoff = 10.milliseconds),
         )
-        StepVerifier.create(processor.process(Flux.just(received(p0, 0))))
-            .expectNext(Position(p0, 0))
-            .verifyComplete()
+        Verify.that(processor.process(Many.items(received(p0, 0))))
+            .emitsNext(Position(p0, 0))
+            .completesNormally()
 
         assertEquals(3, attempts)
     }
@@ -93,15 +105,15 @@ class ProcessorTest {
             batchSize = 3,
             batchDuration = 10.seconds,
         )
-        val messages = Flux.just(
+        val messages = Many.items(
             received(p0, 0), received(p0, 1), received(p0, 2),
             received(p0, 3), received(p0, 4),
         )
 
-        StepVerifier.create(processor.process(messages))
-            .expectNext(Position(p0, 0), Position(p0, 1), Position(p0, 2))
-            .expectNext(Position(p0, 3), Position(p0, 4))
-            .verifyComplete()
+        Verify.that(processor.process(messages))
+            .emitsNext(Position(p0, 0), Position(p0, 1), Position(p0, 2))
+            .emitsNext(Position(p0, 3), Position(p0, 4))
+            .completesNormally()
     }
 
     @Test
@@ -118,9 +130,9 @@ class ProcessorTest {
             batchSize = 2,
             batchDuration = 10.seconds,
         )
-        val messages = Flux.just(received(p0, 0, "a"), received(p0, 1, "b"), received(p0, 2, "c"))
+        val messages = Many.items(received(p0, 0, "a"), received(p0, 1, "b"), received(p0, 2, "c"))
 
-        processor.process(messages).blockLast()
+        runBlocking { processor.process(messages).last() }
 
         assertEquals(listOf(listOf("a", "b"), listOf("c")), batches)
     }
@@ -139,11 +151,11 @@ class ProcessorTest {
             batchSize = 10,
             batchDuration = 50.milliseconds,
         )
-        val messages = Flux.just(received(p0, 0, "a"))
+        val messages = Many.items(received(p0, 0, "a"))
 
-        StepVerifier.create(processor.process(messages))
-            .expectNext(Position(p0, 0))
-            .verifyComplete()
+        Verify.that(processor.process(messages))
+            .emitsNext(Position(p0, 0))
+            .completesNormally()
 
         assertEquals(1, batches.size)
         assertEquals(listOf("a"), batches[0])
@@ -167,9 +179,9 @@ class ProcessorTest {
             batchDuration = 10.seconds,
             retryConfig = RetryConfig(minBackoff = 10.milliseconds),
         )
-        StepVerifier.create(processor.process(Flux.just(received(p0, 0, "a"), received(p0, 1, "b"))))
-            .expectNext(Position(p0, 0), Position(p0, 1))
-            .verifyComplete()
+        Verify.that(processor.process(Many.items(received(p0, 0, "a"), received(p0, 1, "b"))))
+            .emitsNext(Position(p0, 0), Position(p0, 1))
+            .completesNormally()
         assertEquals(2, attempts)
     }
 
@@ -245,13 +257,13 @@ class ProcessorTest {
             keyExtractor = { p -> p.value },
             handler = { key, p -> processed.add("$key:${p.value}") },
         )
-        val messages = Flux.just(
+        val messages = Many.items(
             received(p0, 0, "a"),
             received(p0, 1, "b"),
             received(p0, 2, "a"),
         )
 
-        processor.process(messages).blockLast()
+        runBlocking { processor.process(messages).last() }
 
         assertEquals(3, processed.size)
         assertTrue(processed.any { it == "a:a" }, "key 'a' processed")
@@ -270,14 +282,14 @@ class ProcessorTest {
             keyExtractor = { p -> p.value },
             handler = { _, _ -> },
         )
-        val messages = Flux.just(
+        val messages = Many.items(
             received(p0, 0, "a"),
             received(p0, 1, "b"),
             received(p0, 2, "a"),
             received(p0, 3, "b"),
         )
 
-        val lastPosition = processor.process(messages).blockLast()
+        val lastPosition = runBlocking { processor.process(messages).last().rightOrNull() }
 
         assertEquals(Position(p0, 3), lastPosition)
     }
@@ -299,9 +311,9 @@ class ProcessorTest {
             },
             retryConfig = RetryConfig(minBackoff = 10.milliseconds),
         )
-        StepVerifier.create(processor.process(Flux.just(received(p0, 0, "a"))).take(1))
-            .expectNextCount(1)
-            .verifyComplete()
+        Verify.that(processor.process(Many.items(received(p0, 0, "a"))))
+            .emitsCount(1)
+            .completesNormally()
         assertEquals(2, attempts)
     }
 
@@ -320,14 +332,14 @@ class ProcessorTest {
             batchSize = 2,
             batchDuration = 10.seconds,
         )
-        val messages = Flux.just(
+        val messages = Many.items(
             received(p0, 0, "a"),
             received(p0, 1, "a"),
             received(p0, 2, "b"),
             received(p0, 3, "b"),
         )
 
-        processor.process(messages).blockLast()
+        runBlocking { processor.process(messages).last() }
 
         assertEquals(2, batches.size)
     }
@@ -346,14 +358,14 @@ class ProcessorTest {
             batchSize = 2,
             batchDuration = 10.seconds,
         )
-        val messages = Flux.just(
+        val messages = Many.items(
             received(p0, 0, "a"),
             received(p0, 1, "a"),
             received(p0, 2, "b"),
             received(p0, 3, "b"),
         )
 
-        val lastPosition = processor.process(messages).blockLast()
+        val lastPosition = runBlocking { processor.process(messages).last().rightOrNull() }
 
         assertEquals(Position(p0, 3), lastPosition)
     }
@@ -373,9 +385,9 @@ class ProcessorTest {
             batchSize = 10,
             batchDuration = 50.milliseconds,
         )
-        StepVerifier.create(processor.process(Flux.just(received(p0, 0, "a"))))
-            .expectNext(Position(p0, 0))
-            .verifyComplete()
+        Verify.that(processor.process(Many.items(received(p0, 0, "a"))))
+            .emitsNext(Position(p0, 0))
+            .completesNormally()
         assertEquals(1, batches.size)
         assertEquals(listOf("a"), batches[0])
     }
@@ -395,9 +407,9 @@ class ProcessorTest {
             handler = {},
             retryConfig = RetryConfig(minBackoff = 10.milliseconds),
         )
-        StepVerifier.create(processor.process(Flux.just(received(p0, 0))))
-            .expectNext(Position(p0, 0))
-            .verifyComplete()
+        Verify.that(processor.process(Many.items(received(p0, 0))))
+            .emitsNext(Position(p0, 0))
+            .completesNormally()
         assertEquals(2, attempts)
     }
 
@@ -417,9 +429,9 @@ class ProcessorTest {
             handler = { _, _ -> },
             retryConfig = RetryConfig(minBackoff = 10.milliseconds),
         )
-        StepVerifier.create(processor.process(Flux.just(received(p0, 0, "a"))).take(1))
-            .expectNextCount(1)
-            .verifyComplete()
+        Verify.that(processor.process(Many.items(received(p0, 0, "a"))))
+            .emitsCount(1)
+            .completesNormally()
         assertEquals(2, attempts, "deserialization is retried inside retry scope")
     }
 
@@ -434,8 +446,8 @@ class ProcessorTest {
             },
             handler = {},
         )
-        StepVerifier.create(processor.process(Flux.empty()))
-            .verifyComplete()
+        Verify.that(processor.process(Many.empty()))
+            .completesNormally()
     }
 
     @Test
@@ -451,8 +463,8 @@ class ProcessorTest {
             batchSize = 2,
             batchDuration = 10.seconds,
         )
-        StepVerifier.create(processor.process(Flux.empty()))
-            .verifyComplete()
+        Verify.that(processor.process(Many.empty()))
+            .completesNormally()
     }
 
     @Test
@@ -467,8 +479,8 @@ class ProcessorTest {
             keyExtractor = { p -> p.value },
             handler = { _, _ -> },
         )
-        StepVerifier.create(processor.process(Flux.empty()))
-            .verifyComplete()
+        Verify.that(processor.process(Many.empty()))
+            .completesNormally()
     }
 
     @Test
@@ -483,9 +495,9 @@ class ProcessorTest {
             handler = {},
             maxConcurrency = 4,
         )
-        StepVerifier.create(processor.process(Flux.just(received(p0, 0), received(p0, 1))))
-            .expectNext(Position(p0, 0), Position(p0, 1))
-            .verifyComplete()
+        Verify.that(processor.process(Many.items(received(p0, 0), received(p0, 1))))
+            .emitsNext(Position(p0, 0), Position(p0, 1))
+            .completesNormally()
     }
 
     @Test
@@ -495,9 +507,9 @@ class ProcessorTest {
             deserializer = { DeserializationResult.Tombstone },
             handler = { processed.add(it.value) },
         )
-        StepVerifier.create(processor.process(Flux.just(received(p0, 0))))
-            .expectNext(Position(p0, 0))
-            .verifyComplete()
+        Verify.that(processor.process(Many.items(received(p0, 0))))
+            .emitsNext(Position(p0, 0))
+            .completesNormally()
         assertEquals(emptyList(), processed)
     }
 
@@ -508,9 +520,9 @@ class ProcessorTest {
             deserializer = { DeserializationResult.PoisonPill("bad data") },
             handler = { processed.add(it.value) },
         )
-        StepVerifier.create(processor.process(Flux.just(received(p0, 0))))
-            .expectNext(Position(p0, 0))
-            .verifyComplete()
+        Verify.that(processor.process(Many.items(received(p0, 0))))
+            .emitsNext(Position(p0, 0))
+            .completesNormally()
         assertEquals(emptyList(), processed)
     }
 
@@ -531,14 +543,14 @@ class ProcessorTest {
             batchSize = 4,
             batchDuration = 10.seconds,
         )
-        StepVerifier.create(processor.process(Flux.just(
+        Verify.that(processor.process(Many.items(
             received(p0, 0, "a"),
             received(p0, 1, "b"),
             received(p0, 2, "c"),
             received(p0, 3, "d"),
         )))
-            .expectNext(Position(p0, 0), Position(p0, 1), Position(p0, 2), Position(p0, 3))
-            .verifyComplete()
+            .emitsNext(Position(p0, 0), Position(p0, 1), Position(p0, 2), Position(p0, 3))
+            .completesNormally()
     }
 
     @Test
@@ -555,15 +567,18 @@ class ProcessorTest {
             keyExtractor = { p -> p.value },
             handler = { _, p -> processed.add(p.value) },
         )
-        StepVerifier.create(processor.process(Flux.just(
-            received(p0, 0, "a"),
-            received(p0, 1, "b"),
-            received(p0, 2, "c"),
-        )))
-            .expectNext(Position(p0, 0))
-            .expectNext(Position(p0, 1))
-            .expectNext(Position(p0, 2))
-            .verifyComplete()
+        val positions = runBlocking {
+            when (val result = processor.process(Many.items(
+                received(p0, 0, "a"),
+                received(p0, 1, "b"),
+                received(p0, 2, "c"),
+            )).toList().await()) {
+                is Success -> result.value
+                is Failure -> fail("expected success but got failure: ${result.value}")
+            }
+        }
+        assertTrue(positions.isNotEmpty())
+        assertEquals(Position(p0, 2), positions.last())
         assertEquals(listOf("a", "c"), processed)
     }
 }

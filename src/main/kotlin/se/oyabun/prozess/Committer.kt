@@ -1,47 +1,46 @@
 package se.oyabun.prozess
 
-import reactor.core.Disposable
-import reactor.core.publisher.Flux
-import reactor.core.publisher.Mono
-import reactor.core.publisher.Sinks
-import reactor.core.scheduler.Scheduler
-import reactor.core.scheduler.Schedulers
-import reactor.util.retry.Retry
-import se.oyabun.prozess.CommitFailure
-import se.oyabun.prozess.CommitterAlreadyRunning
-import se.oyabun.prozess.Logger
-import se.oyabun.prozess.Offsets
-import se.oyabun.prozess.Partitions
-import se.oyabun.prozess.Position
-import se.oyabun.prozess.Retrying.anyException
-import se.oyabun.prozess.Retrying.infiniteRetries
-import se.oyabun.prozess.Retrying.withRetries
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.newSingleThreadContext
+import se.oyabun.aelv.Many
+import se.oyabun.aelv.None
+import se.oyabun.aelv.Policy
+import se.oyabun.aelv.Sinks
+import se.oyabun.aelv.asMany
+import se.oyabun.aelv.bufferTimeout
+import se.oyabun.aelv.concatMap
+import se.oyabun.aelv.doOnError
+import se.oyabun.aelv.doOnNext
+import se.oyabun.aelv.drain
+import se.oyabun.aelv.flatMapMany
+import se.oyabun.aelv.publishOn
+import se.oyabun.aelv.retry
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.atomics.AtomicReference as KAtomicReference
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
+import kotlin.concurrent.atomics.update
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
-import kotlin.time.toJavaDuration
-import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.concurrent.atomics.AtomicReference
-import kotlin.concurrent.atomics.ExperimentalAtomicApi
-import kotlin.concurrent.atomics.fetchAndUpdate
-import kotlin.concurrent.atomics.update
 
 interface Committer {
-
-    fun markProcessed(position: Position): Mono<Position>
-
+    suspend fun markProcessed(position: Position)
     fun seedOffsets(offsets: Offsets)
-
-    val positions: Flux<Position>
-
+    val positions: Many<Position>
     val processedOffsets: Offsets
-
+    val committedOffsets: Many<Offsets>
     fun start()
-
-    fun stop(): Mono<Void>
+    fun stop(): None<Unit>
 }
 
 @OptIn(ExperimentalAtomicApi::class)
+@Suppress("OPT_IN_USAGE")
 internal class BufferedCommitter(
     private val client: KafkaClient,
     private val instanceId: String,
@@ -49,95 +48,74 @@ internal class BufferedCommitter(
     private val log: Logger,
     private val bufferSize: Int = 500,
     private val maxBatchSize: Int = 25,
-    private val maxBatchTime: java.time.Duration = 1.seconds.toJavaDuration(),
+    private val maxBatchTime: kotlin.time.Duration = 1.seconds,
 ) : Committer {
 
-    private val processedOffsetsRef = AtomicReference<Offsets>(emptyMap())
-    private val processed = Sinks.many().multicast().onBackpressureBuffer<Position>(bufferSize)
-    private val done = Sinks.one<Unit>()
-    private val schedulerRef = AtomicReference(Schedulers.immediate())
-    private val running = AtomicBoolean(false)
-    private var disposable: Disposable = Disposable { }
+    private val processedOffsetsRef  = KAtomicReference<Offsets>(emptyMap())
+    private val positionSink         = Sinks.replay<Position>()
+    private val committedOffsetsSink = Sinks.replayLast<Offsets>(1)
+    private val doneSink             = Sinks.broadcast<Unit>()
+    private val running              = AtomicBoolean(false)
+    private val dispatcher           = newSingleThreadContext("$instanceId-committer")
+    private val scope                = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val noopJob              = Job().also { it.cancel() }
+    private val job                  = AtomicReference<Job>(noopJob)
 
     override val processedOffsets: Offsets get() = processedOffsetsRef.load()
-
-    override val positions: Flux<Position> get() = processed.asFlux()
+    override val positions: Many<Position>  get() = positionSink.asMany()
+    override val committedOffsets: Many<Offsets> get() = committedOffsetsSink.asMany()
 
     override fun seedOffsets(offsets: Offsets) {
         processedOffsetsRef.update { it + offsets }
     }
 
-    override fun markProcessed(position: Position): Mono<Position> {
+    override suspend fun markProcessed(position: Position) {
         processedOffsetsRef.update { current ->
             val offset = maxOf(current[position.partition] ?: 0L, position.offset + 1)
             current + (position.partition to offset)
         }
-        val result = processed.tryEmitNext(position)
-        return when {
-            result === Sinks.EmitResult.OK -> Mono.just(position)
-            result === Sinks.EmitResult.FAIL_TERMINATED || result === Sinks.EmitResult.FAIL_CANCELLED -> Mono.just(position)
-            result === Sinks.EmitResult.FAIL_OVERFLOW -> {
-                log.kafka.commitBackpressure(instanceId, position.partition)
-                Mono.delay(100.milliseconds.toJavaDuration()).then(Mono.defer { markProcessed(position) })
-            }
-            else -> Mono.error(CommitFailure("$instanceId failed to emit position $position to processed sink: $result"))
-        }
+        positionSink.tryEmit(position)
     }
 
     override fun start() {
         if (!running.compareAndSet(false, true)) throw CommitterAlreadyRunning("$instanceId already running")
-        val scheduler = Schedulers.newSingle("$instanceId-committer")
-        schedulerRef.store(scheduler)
-        disposable = processed.asFlux()
-            .bufferTimeout(maxBatchSize, maxBatchTime)
-            .publishOn(scheduler)
-            .concatMap { batch ->
-                val assigned = assignments()
-                val current = batch.filter { it.partition in assigned }
-                if (current.isEmpty()) Mono.empty()
-                else {
+        job.set(scope.launch {
+            positionSink.asMany()
+                .bufferTimeout(maxBatchSize, maxBatchTime)
+                .publishOn(dispatcher)
+                .concatMap { batch: List<Position> ->
+                    val assigned = assignments()
+                    val current  = batch.filter { it.partition in assigned }
+                    if (current.isEmpty()) return@concatMap Many.empty<Unit>()
                     val offsets = current.groupBy({ it.partition }, { it.offset })
-                    val latest = offsets.mapValues { it.value.max() + 1 }
+                    val latest  = offsets.mapValues { (_, v) -> v.max() + 1 }
                     client.commit(latest, "$instanceId@${Clock.System.now()}")
-                        .doOnError { cause -> log.kafka.commitFailed(instanceId, latest.keys, cause) }
-                        .doOnSuccess { log.kafka.committed(instanceId, latest.keys) }
-                        .withRetries(id = instanceId, retryOn = anyException, maxAttempts = infiniteRetries)
+                        .doOnError { cause -> log.kafka.commitFailed(instanceId, latest.keys, cause.cause ?: cause) }
+                        .doOnNext { committed ->
+                            log.kafka.committed(instanceId, latest.keys)
+                            committedOffsetsSink.tryEmit(committed)
+                        }
+                        .withRetries(instanceId, log)
+                        .flatMapMany { Many.empty<Unit>() }
                 }
-            }
-            .retryWhen(restartIndefinitely())
-            .ignoreElements()
-            .subscribe(
-                {},
-                { signalCompletion(it) },
-                { signalCompletion() },
-            )
+                .retry(Policy.retry().withBackoff(500.milliseconds, 30.seconds))
+                .drain({}, { signalCompletion(it) }, { signalCompletion() })
+        })
     }
 
-    override fun stop(): Mono<Void> {
-        if (!running.get()) {
-            disposable.dispose()
-            schedulerRef.fetchAndUpdate { Schedulers.immediate() }.dispose()
-            return Mono.empty()
-        }
-        processed.tryEmitComplete()
-        return done.asMono()
-            .doFinally {
-                disposable.dispose()
-                schedulerRef.fetchAndUpdate { Schedulers.immediate() }.dispose()
-                running.set(false)
-            }
-            .then()
+    override fun stop(): None<Unit> = None.defer {
+        if (!running.get()) return@defer
+        positionSink.complete()
+        None.from(doneSink.asMany()).await()
+        job.get().cancelAndJoin()
+        running.set(false)
     }
-
-    private fun restartIndefinitely() =
-        Retry.backoff(Long.MAX_VALUE, 500.milliseconds.toJavaDuration())
-            .maxBackoff(30.seconds.toJavaDuration())
-            .doBeforeRetry { log.kafka.componentRestarting(instanceId, "$instanceId-committer", it.failure()) }
 
     private fun signalCompletion(cause: Throwable? = null) {
         running.set(false)
+        dispatcher.close()
         if (cause != null) log.kafka.terminatedUnexpectedly("$instanceId-committer", cause)
         else log.kafka.completed("$instanceId-committer")
-        done.tryEmitEmpty()
+        doneSink.complete()
     }
 }

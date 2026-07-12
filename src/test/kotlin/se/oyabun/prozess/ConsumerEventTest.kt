@@ -1,10 +1,13 @@
 package se.oyabun.prozess
 
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.Timeout
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
+@Timeout(value = 5, unit = TimeUnit.SECONDS)
 class ConsumerEventTest {
 
     private val p0 = Partition(0, Topic("test"))
@@ -72,8 +75,11 @@ class ConsumerEventTest {
         val (consumer, _) = consumer()
         val events = CopyOnWriteArrayList<ConsumerEvent>()
         consumer.onEvent { events.add(it) }
+        val assignedLatch = java.util.concurrent.CountDownLatch(1)
+        consumer.onEvent { if (it is ConsumerEvent.Assigned) assignedLatch.countDown() }
 
         consumer.start(StartOffset.Latest, EndOffset.Continuous)
+        awaitLatch(assignedLatch)
         consumer.shutdown()
 
         val assigned = events.filterIsInstance<ConsumerEvent.Assigned>()
@@ -101,8 +107,11 @@ class ConsumerEventTest {
         )
         val events = CopyOnWriteArrayList<ConsumerEvent>()
         consumer.onEvent { events.add(it) }
+        val assignedLatch = java.util.concurrent.CountDownLatch(1)
+        consumer.onEvent { if (it is ConsumerEvent.Assigned) assignedLatch.countDown() }
 
         consumer.start(StartOffset.Latest, EndOffset.Continuous)
+        awaitLatch(assignedLatch)
 
         // FakeKafkaClient triggers assign on subscribe but not revoke.
         // Verify event ordering: Started -> Assigned -> Stopped
@@ -118,8 +127,11 @@ class ConsumerEventTest {
         val (consumer, _) = consumer()
         val events = CopyOnWriteArrayList<ConsumerEvent>()
         consumer.onEvent { events.add(it) }
+        val assignedLatch = java.util.concurrent.CountDownLatch(1)
+        consumer.onEvent { if (it is ConsumerEvent.Assigned) assignedLatch.countDown() }
 
         consumer.start(StartOffset.Latest, EndOffset.Continuous)
+        awaitLatch(assignedLatch)
         consumer.pause()
         consumer.resume()
         consumer.shutdown()

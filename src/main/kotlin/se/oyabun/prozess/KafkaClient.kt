@@ -1,6 +1,8 @@
 package se.oyabun.prozess
 
-import reactor.core.publisher.Mono
+import se.oyabun.aelv.Many
+import se.oyabun.aelv.None
+import se.oyabun.aelv.One
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Instant
@@ -9,29 +11,29 @@ interface KafkaClient : ShutdownableClient {
 
     val pollInterval: Duration
 
-    fun partitionsFor(topics: Topics): Mono<Partitions>
+    fun partitionsFor(topics: Topics): One<Partitions>
 
-    fun beginningOffsets(partitions: Partitions): Mono<Positions>
+    fun beginningOffsets(partitions: Partitions): One<Positions>
 
-    fun endOffsets(partitions: Partitions): Mono<Positions>
+    fun endOffsets(partitions: Partitions): One<Positions>
 
-    fun subscribe(topics: Topics, listener: RebalanceListener): Mono<Topics>
+    fun subscribe(topics: Topics, listener: RebalanceListener): One<Topics>
 
-    fun offsetsForTimes(partitions: Partitions, timestamp: Instant): Mono<Positions>
+    fun offsetsForTimes(partitions: Partitions, timestamp: Instant): One<Positions>
 
-    fun positionOf(partition: Partition): Mono<Long>
+    fun positionOf(partition: Partition): One<Long>
 
-    fun seek(offsets: Offsets): Mono<Void>
+    fun seek(offsets: Offsets): None<Offsets>
 
-    fun endOffsetOf(partition: Partition): Mono<Long>
+    fun endOffsetOf(partition: Partition): One<Long>
 
-    fun poll(timeout: Duration = 100.milliseconds): Mono<List<Received>>
+    fun poll(timeout: Duration = 100.milliseconds): One<List<Received>>
 
-    fun pause(partitions: Partitions): Mono<Partitions>
+    fun pause(partitions: Partitions): One<Partitions>
 
-    fun resume(partitions: Partitions): Mono<Partitions>
+    fun resume(partitions: Partitions): One<Partitions>
 
-    fun commit(offsets: Offsets, metadata: String = ""): Mono<Offsets>
+    fun commit(offsets: Offsets, metadata: String = ""): One<Offsets>
 
-    fun committed(partitions: Partitions): Mono<Offsets>
+    fun committed(partitions: Partitions): One<Offsets>
 }

@@ -1,14 +1,11 @@
 package se.oyabun.prozess
 
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
-import reactor.core.publisher.Flux
-import reactor.core.publisher.Mono
-import se.oyabun.prozess.Logging
-import se.oyabun.prozess.Offsets
-import se.oyabun.prozess.Partition
-import se.oyabun.prozess.Partitions
-import se.oyabun.prozess.Position
-import se.oyabun.prozess.Topic
+import org.junit.jupiter.api.Timeout
+import se.oyabun.aelv.Many
+import se.oyabun.aelv.None
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -18,6 +15,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlin.test.fail
 
+@Timeout(value = 5, unit = TimeUnit.SECONDS)
 @OptIn(ExperimentalAtomicApi::class)
 class PartitionManagerTest {
 
@@ -36,8 +34,10 @@ class PartitionManagerTest {
             instanceId = "test",
             log = log,
         )
-        committer.markProcessed(Position(p0, 5L)).block()
-        committer.markProcessed(Position(p1, 10L)).block()
+        runBlocking {
+            committer.markProcessed(Position(p0, 5L))
+            committer.markProcessed(Position(p1, 10L))
+        }
 
         val context = mockContext(onCommit = { committed.add(it) })
         val handler = handler()
@@ -59,9 +59,11 @@ class PartitionManagerTest {
             instanceId = "test",
             log = log,
         )
-        committer.markProcessed(Position(p0, 5L)).block()
-        committer.markProcessed(Position(p1, 10L)).block()
-        committer.markProcessed(Position(p2, 15L)).block()
+        runBlocking {
+            committer.markProcessed(Position(p0, 5L))
+            committer.markProcessed(Position(p1, 10L))
+            committer.markProcessed(Position(p2, 15L))
+        }
 
         val context = mockContext(onCommit = { committed.add(it) })
         val handler = handler()
@@ -150,7 +152,7 @@ class PartitionManagerTest {
             instanceId = "test",
             log = log,
         )
-        committer.markProcessed(Position(p0, 5L)).block()
+        runBlocking { committer.markProcessed(Position(p0, 5L)) }
 
         val context = mockContext(onCommit = { committed.add(it) })
         val handler = handler()
@@ -170,8 +172,10 @@ class PartitionManagerTest {
             instanceId = "test",
             log = log,
         )
-        committer.markProcessed(Position(p0, 5L)).block()
-        committer.markProcessed(Position(p2, 15L)).block()
+        runBlocking {
+            committer.markProcessed(Position(p0, 5L))
+            committer.markProcessed(Position(p2, 15L))
+        }
 
         val context = mockContext(onCommit = { committed.add(it) })
         val handler = handler()
@@ -246,8 +250,10 @@ class PartitionManagerTest {
 
         val context = mockContext(onCommit = { committed.add(it) })
 
-        committer.markProcessed(Position(p0, 5L)).block()
-        committer.markProcessed(Position(p1, 10L)).block()
+        runBlocking {
+            committer.markProcessed(Position(p0, 5L))
+            committer.markProcessed(Position(p1, 10L))
+        }
 
         handler.onPartitionsRevoked(context, setOf(p0), committer.processedOffsets)
 
@@ -257,7 +263,7 @@ class PartitionManagerTest {
         assertEquals(setOf(p0), flushCommit.keys, "flush should include p0")
         assertEquals(6L, flushCommit[p0], "Flushed offset for p0 should be 6 (5 + 1)")
 
-        committer.stop().block()
+        runBlocking { committer.stop().await() }
     }
 
     @Test
@@ -278,26 +284,30 @@ class PartitionManagerTest {
         val processingStarted = CountDownLatch(1)
         val processingActive = AtomicBoolean(true)
 
-        val processingThread = Thread {
-            committer.markProcessed(Position(p0, 0L)).block()
-            committer.markProcessed(Position(p1, 0L)).block()
-            committer.markProcessed(Position(p2, 0L)).block()
-            var i = 1
-            processingStarted.countDown()
-            while (processingActive.get()) {
-                committer.markProcessed(Position(p0, i.toLong())).block()
-                committer.markProcessed(Position(p1, i.toLong())).block()
-                committer.markProcessed(Position(p2, i.toLong())).block()
-                i++
+        runBlocking {
+            launch {
+                committer.markProcessed(Position(p0, 0L))
+                committer.markProcessed(Position(p1, 0L))
+                committer.markProcessed(Position(p2, 0L))
+                var i = 1
+                processingStarted.countDown()
+                while (processingActive.get()) {
+                    committer.markProcessed(Position(p0, i.toLong()))
+                    committer.markProcessed(Position(p1, i.toLong()))
+                    committer.markProcessed(Position(p2, i.toLong()))
+                    i++
+                    kotlinx.coroutines.yield()
+                }
             }
+
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                processingStarted.await(5, TimeUnit.SECONDS)
+            }
+
+            handler.onPartitionsRevoked(context, setOf(p0, p1, p2), committer.processedOffsets)
+
+            processingActive.set(false)
         }
-        processingThread.start()
-        processingStarted.await()
-
-        handler.onPartitionsRevoked(context, setOf(p0, p1, p2), committer.processedOffsets)
-
-        processingActive.set(false)
-        processingThread.join(2000)
 
         assertTrue(handler.assignments().isEmpty(), "All partitions should be removed")
         assertEquals(1, committed.size, "Should have one commit via context")
@@ -307,7 +317,7 @@ class PartitionManagerTest {
         assertTrue(flushCommit.values.all { it > 0 },
             "Each revoked partition should have committed offset > 0")
 
-        committer.stop().block()
+        runBlocking { committer.stop().await() }
     }
 
     private fun handler(
@@ -321,17 +331,6 @@ class PartitionManagerTest {
         instanceId = "test",
         log = log,
     )
-
-    private fun mockCommitter(
-        onSeed: (Offsets) -> Unit = {},
-    ): Committer = object : Committer {
-        override fun markProcessed(position: Position): Mono<Position> = Mono.just(position)
-        override fun seedOffsets(offsets: Offsets) = onSeed(offsets)
-        override val positions = Flux.empty<Position>()
-        override val processedOffsets: Offsets get() = emptyMap()
-        override fun start() = throw UnsupportedOperationException()
-        override fun stop(): Mono<Void> = Mono.empty()
-    }
 
     private fun mockContext(
         onSeek: (Partition, Long) -> Unit = { _, _ -> },

@@ -1,5 +1,11 @@
 package se.oyabun.prozess
 
+import kotlinx.coroutines.runBlocking
+import kotlin.reflect.KClass
+import se.oyabun.aelv.Failure
+import se.oyabun.aelv.Many
+import se.oyabun.aelv.Success
+import se.oyabun.aelv.await
 import kotlin.time.Duration
 
 object Prozess {
@@ -35,6 +41,8 @@ object Prozess {
         fun position(partition: Partition): Long
         fun lag(partition: Partition): Long
         fun onEvent(callback: (ConsumerEvent) -> Unit)
+        fun <T : ConsumerEvent> onEvent(type: KClass<T>, callback: (T) -> Unit) =
+            onEvent { if (type.isInstance(it)) @Suppress("UNCHECKED_CAST") callback(it as T) }
     }
 
     private fun <M : Any> simpleDeserializer(deserializeBytes: (ByteArray) -> M): Deserializer<M> = { received ->
@@ -80,16 +88,21 @@ object Prozess {
         instance: String? = "producer",
     ): Producer<M> = object : Producer<M> {
         val delegate = StreamingProducer(config, instance, serializer)
-        override fun send(key: String, value: M, partition: Int?, timestamp: Long?, headers: Headers): Long { return delegate.send(key, value, partition, timestamp, headers).blockOptional().orElseThrow() }
-        override fun sendOffsetsToTransaction(offsets: Offsets, member: GroupMember) { delegate.sendOffsetsToTransaction(offsets, member).block() }
-        override fun initTransactions() { delegate.initTransactions().block() }
-        override fun beginTransaction() { delegate.beginTransaction().block() }
-        override fun commitTransaction() { delegate.commitTransaction().block() }
-        override fun abortTransaction() { delegate.abortTransaction().block() }
-        override fun close() { delegate.close().block() }
+        override fun send(key: String, value: M, partition: Int?, timestamp: Long?, headers: Headers): Long {
+            val result = runBlocking { delegate.send(key, value, partition, timestamp, headers).await() }
+            return when (result) {
+                is Success -> result.value
+                is Failure -> throw SendFailure("$instance send failed", RuntimeException(result.value.message))
+            }
+        }
+        override fun sendOffsetsToTransaction(offsets: Offsets, member: GroupMember) { runBlocking { delegate.sendOffsetsToTransaction(offsets, member).await() } }
+        override fun initTransactions()  { runBlocking { delegate.initTransactions().await() } }
+        override fun beginTransaction()  { runBlocking { delegate.beginTransaction().await() } }
+        override fun commitTransaction() { runBlocking { delegate.commitTransaction().await() } }
+        override fun abortTransaction()  { runBlocking { delegate.abortTransaction().await() } }
+        override fun close()             { runBlocking { delegate.close().await() } }
     }
 
-    /** Builds a [Consumer] by configuring the processing pipeline. */
     class ConsumerBuilder<M : Any>(
         private val config: ConsumerConfig,
         private val deserializer: Deserializer<M>,
@@ -133,7 +146,6 @@ object Prozess {
             wrap(config, processor, instance)
     }
 
-    /** Builds a [Consumer] that groups messages by a key for per-key ordered processing. */
     class GroupedConsumerBuilder<K : Any, M : Any>(
         private val config: ConsumerConfig,
         private val deserializer: Deserializer<M>,
@@ -177,3 +189,6 @@ object Prozess {
             wrap(config, processor, instance)
     }
 }
+
+inline fun <reified T : ConsumerEvent> Prozess.Consumer<*>.onEvent(noinline callback: (T) -> Unit) =
+    onEvent { if (it is T) callback(it) }

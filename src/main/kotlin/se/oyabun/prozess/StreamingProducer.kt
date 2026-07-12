@@ -1,76 +1,81 @@
 package se.oyabun.prozess
 
-import se.oyabun.prozess.GroupMember
-import se.oyabun.prozess.Logging
-import se.oyabun.prozess.Offsets
-import se.oyabun.prozess.ProducerConfig
-import se.oyabun.prozess.Prozess.HeadersProvider
-import se.oyabun.prozess.Prozess.KeyExtraction
-import se.oyabun.prozess.Prozess.Serializer
-import se.oyabun.prozess.Retrying.anyException
-import se.oyabun.prozess.Retrying.infiniteRetries
-import se.oyabun.prozess.Retrying.withRetries
+import kotlinx.coroutines.runBlocking
 import org.apache.kafka.clients.consumer.OffsetAndMetadata
 import org.apache.kafka.clients.producer.KafkaProducer
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.header.internals.RecordHeader
-import reactor.core.publisher.Flux
-import reactor.core.publisher.Mono
-import reactor.core.scheduler.Schedulers
+import se.oyabun.aelv.Many
+import se.oyabun.aelv.None
+import se.oyabun.aelv.One
+import se.oyabun.aelv.concatMap
+import se.oyabun.aelv.flatMapMany
+import se.oyabun.aelv.groupBy
+import java.util.concurrent.atomic.AtomicBoolean
 
+@Suppress("OPT_IN_USAGE")
 class StreamingProducer<M : Any>(
     val config: ProducerConfig,
     instance: String? = "producer",
-    private val serializer: Serializer<M>,
+    private val serializer: Prozess.Serializer<M>,
 ) {
-    private val log = Logging.logger { }
+    private val log        = Logging.logger { }
     private val instanceId = "[$instance ${config.topic} producer]"
-    private val delegate = KafkaProducer<String, ByteArray>(config.toKafkaProperties())
+    private val delegate   = KafkaProducer<String, ByteArray>(config.toKafkaProperties())
+    private val dispatcher = kotlinx.coroutines.newSingleThreadContext("$instanceId-producer")
+    private val closed     = AtomicBoolean(false)
 
-    fun send(key: String, value: M, partition: Int? = null, timestamp: Long? = null, headers: Headers = emptyList()): Mono<Long> =
-        Mono.create { sink ->
-            val kafkaHeaders = headers.map { RecordHeader(it.key, it.value) }
-            delegate.send(
-                org.apache.kafka.clients.producer.ProducerRecord(config.topic.name, partition, timestamp, key, serializer(value), kafkaHeaders),
-            ) { metadata, exception ->
-                if (exception != null) sink.error(SendFailure("$instanceId send failed", exception))
-                else sink.success(metadata.offset())
-            }
-        }.withRetries(id = instanceId, retryOn = anyException, maxAttempts = infiniteRetries)
+    fun send(
+        key: String,
+        value: M,
+        partition: Int? = null,
+        timestamp: Long? = null,
+        headers: Headers = emptyList(),
+    ): One<Long> = One.create<Long> { success, failure ->
+        val kafkaHeaders = headers.map { RecordHeader(it.key, it.value) }
+        delegate.send(
+            org.apache.kafka.clients.producer.ProducerRecord(
+                config.topic.name, partition, timestamp, key, serializer(value), kafkaHeaders,
+            ),
+        ) { metadata, exception ->
+            if (exception != null) failure(SendFailure("$instanceId send failed", exception))
+            else success(metadata.offset())
+        }
+    }.withRetries(instanceId, log)
 
     fun sendAll(
-        source: Flux<M>,
-        key: KeyExtraction<M>,
-        headersProvider: HeadersProvider<M> = { emptyList() },
-    ): Flux<M> = source
-        .groupBy { key(it) }
-        .flatMap { group -> group.concatMap { element -> send(group.key(), element, headers = headersProvider(element)).thenReturn(element) } }
+        source: Many<M>,
+        key: Prozess.KeyExtraction<M>,
+        headersProvider: Prozess.HeadersProvider<M> = { emptyList() },
+    ): Many<M> = source.groupBy(
+        keySelector  = { m: M -> key(m) },
+        groupHandler = { _, group: Many<M> ->
+            group.concatMap { element: M ->
+                send(key(element), element, headers = headersProvider(element))
+                    .flatMapMany { Many.items(element) }
+            }
+        },
+    )
 
-    fun initTransactions(): Mono<Void> = Mono.fromCallable { delegate.initTransactions() }.then()
-        .subscribeOn(Schedulers.boundedElastic())
+    fun initTransactions(): None<Unit>  = None.defer(dispatcher) { delegate.initTransactions() }
+    fun beginTransaction(): None<Unit>  = None.defer(dispatcher) { delegate.beginTransaction() }
+    fun commitTransaction(): None<Unit> = None.defer(dispatcher) { delegate.commitTransaction() }
+    fun abortTransaction(): None<Unit>  = None.defer(dispatcher) { delegate.abortTransaction() }
 
-    fun beginTransaction(): Mono<Void> = Mono.fromCallable { delegate.beginTransaction() }.then()
-        .subscribeOn(Schedulers.boundedElastic())
-
-    fun commitTransaction(): Mono<Void> = Mono.fromCallable { delegate.commitTransaction() }.then()
-        .subscribeOn(Schedulers.boundedElastic())
-
-    fun abortTransaction(): Mono<Void> = Mono.fromCallable { delegate.abortTransaction() }.then()
-        .subscribeOn(Schedulers.boundedElastic())
-
-    fun sendOffsetsToTransaction(offsets: Offsets, member: GroupMember): Mono<Void> = Mono.fromCallable {
+    fun sendOffsetsToTransaction(offsets: Offsets, member: GroupMember): None<Unit> = None.defer(dispatcher) {
         delegate.sendOffsetsToTransaction(
             offsets.entries.associate { (partition, offset) ->
                 TopicPartition(partition.topic.name, partition.id) to OffsetAndMetadata(offset, "")
             },
             org.apache.kafka.clients.consumer.ConsumerGroupMetadata(
-                member.groupId,
-                member.generationId,
-                member.memberId,
+                member.groupId, member.generationId, member.memberId,
                 java.util.Optional.ofNullable(member.groupInstanceId),
             ),
         )
-    }.then().subscribeOn(Schedulers.boundedElastic())
+    }
 
-    fun close(): Mono<Void> = Mono.fromRunnable { delegate.close(java.time.Duration.ofSeconds(3)) }
+    fun close(): None<Unit> = if (!closed.compareAndSet(false, true)) None.complete() else None.defer(dispatcher) {
+        delegate.close(java.time.Duration.ofSeconds(3))
+        dispatcher.close()
+    }
 }

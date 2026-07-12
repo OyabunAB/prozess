@@ -25,3 +25,5 @@ jobs:
         run: ./gradlew check
         env:
           TESTCONTAINERS_RYUK_DISABLED: "true"
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
