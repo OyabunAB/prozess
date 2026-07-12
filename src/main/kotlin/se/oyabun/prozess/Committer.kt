@@ -102,12 +102,12 @@ internal class BufferedCommitter(
         positionSink.complete()
         None.from(doneSink.asMany()).await()
         job?.cancelAndJoin()
-        dispatcher.close()
         running.set(false)
     }
 
     private fun signalCompletion(cause: Throwable? = null) {
         running.set(false)
+        dispatcher.close()
         if (cause != null) log.kafka.terminatedUnexpectedly("$instanceId-committer", cause)
         else log.kafka.completed("$instanceId-committer")
         doneSink.complete()

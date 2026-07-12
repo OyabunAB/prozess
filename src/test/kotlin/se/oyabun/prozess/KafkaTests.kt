@@ -59,7 +59,7 @@ class KafkaTests {
                 latch.countDown()
             }
             consumer.start(from = StartOffset.Earliest)
-            assertTrue(latch.await(30, TimeUnit.SECONDS), "timed out waiting for $count messages")
+            assertTrue(latch.await(5, TimeUnit.SECONDS), "timed out waiting for $count messages")
             assertEquals(published.sorted(), received.sorted())
             consumer.shutdown()
         }
@@ -78,7 +78,7 @@ class KafkaTests {
                 latch.countDown()
             }
             consumer.start(from = StartOffset.Earliest)
-            assertTrue(latch.await(30, TimeUnit.SECONDS), "timed out waiting for $count messages, got ${received.size}")
+            assertTrue(latch.await(5, TimeUnit.SECONDS), "timed out waiting for $count messages, got ${received.size}")
             assertEquals(published.sorted(), received.sorted().toList())
             consumer.shutdown()
         }
@@ -203,7 +203,7 @@ class KafkaTests {
                 latch.countDown()
             }
             consumer.start(from = StartOffset.Earliest)
-            assertTrue(latch.await(30, TimeUnit.SECONDS), "timed out waiting for committed message")
+            assertTrue(latch.await(5, TimeUnit.SECONDS), "timed out waiting for committed message")
             consumer.shutdown()
 
             assertEquals(listOf(payload), received)
@@ -250,7 +250,7 @@ class KafkaTests {
                 latch.countDown()
             }
             consumer.start(from = StartOffset.Earliest)
-            assertTrue(latch.await(30, TimeUnit.SECONDS), "timed out waiting for committed message")
+            assertTrue(latch.await(5, TimeUnit.SECONDS), "timed out waiting for committed message")
             consumer.shutdown()
 
             assertEquals(listOf(committedPayload), received, "aborted message should not be visible")
@@ -278,7 +278,7 @@ class KafkaTests {
                 latch.countDown()
             }
             consumer.start(from = StartOffset.Earliest)
-            assertTrue(latch.await(30, TimeUnit.SECONDS), "timed out waiting for message")
+            assertTrue(latch.await(5, TimeUnit.SECONDS), "timed out waiting for message")
             consumer.shutdown()
 
             assertEquals(1, receivedHeaders.size)
@@ -365,7 +365,7 @@ class KafkaTests {
                 ),
             )
             consumer.start() // no from parameter — should use config.startOffset
-            assertTrue(latch.await(30, TimeUnit.SECONDS), "timed out waiting for $count messages, got ${received.size}")
+            assertTrue(latch.await(5, TimeUnit.SECONDS), "timed out waiting for $count messages, got ${received.size}")
             assertEquals(published.sorted(), received.sorted().toList())
             consumer.shutdown()
         }
@@ -389,7 +389,7 @@ class KafkaTests {
 
             val newMessages = publish(bootstrapServers, topicName, count = 5)
 
-            assertTrue(latch.await(30, TimeUnit.SECONDS), "timed out waiting for new messages, got ${received.size}")
+            assertTrue(latch.await(5, TimeUnit.SECONDS), "timed out waiting for new messages, got ${received.size}")
             consumer.shutdown()
 
             val preExistingSet = preExisting.toSet()
@@ -425,7 +425,7 @@ class KafkaTests {
                 latch.countDown()
             }
             consumer.start(from = StartOffset.AtTimestamp(kotlin.time.Instant.fromEpochMilliseconds(targetTimestamp)))
-            assertTrue(latch.await(30, TimeUnit.SECONDS), "timed out, got ${received.size}")
+            assertTrue(latch.await(5, TimeUnit.SECONDS), "timed out, got ${received.size}")
             consumer.shutdown()
 
             val earlySet = earlyMessages.toSet()
@@ -484,7 +484,7 @@ class KafkaTests {
                 latch.countDown()
             }
             consumer.start(from = StartOffset.Earliest, until = EndOffset.CatchUp)
-            assertTrue(latch.await(30, TimeUnit.SECONDS), "timed out, got ${received.size}")
+            assertTrue(latch.await(5, TimeUnit.SECONDS), "timed out, got ${received.size}")
             consumer.shutdown()
 
             // Publish more after catch-up — should not be received
@@ -516,7 +516,7 @@ class KafkaTests {
                 latch.countDown()
             }
             consumer.start(from = StartOffset.Earliest, until = EndOffset.CatchUp)
-            assertTrue(latch.await(30, TimeUnit.SECONDS), "timed out, got ${received.size}")
+            assertTrue(latch.await(5, TimeUnit.SECONDS), "timed out, got ${received.size}")
             consumer.shutdown()
 
             assertEquals(allPublished, received.sorted().toList(), "Should receive all messages from all partitions")
@@ -545,7 +545,7 @@ class KafkaTests {
                 from = StartOffset.AtTimestamp(kotlin.time.Instant.fromEpochMilliseconds(targetTimestamp)),
                 until = EndOffset.CatchUp,
             )
-            assertTrue(latch.await(30, TimeUnit.SECONDS), "timed out, got ${received.size}")
+            assertTrue(latch.await(5, TimeUnit.SECONDS), "timed out, got ${received.size}")
             consumer.shutdown()
 
             val earlySet = earlyMessages.toSet()

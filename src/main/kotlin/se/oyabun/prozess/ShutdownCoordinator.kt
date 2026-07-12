@@ -1,10 +1,11 @@
 package se.oyabun.prozess
 
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
+import se.oyabun.aelv.Either
+import se.oyabun.aelv.Failure
 import se.oyabun.aelv.None
 import se.oyabun.aelv.Sink
+import se.oyabun.aelv.await
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
@@ -22,25 +23,16 @@ class ShutdownCoordinator(
     private val log: Logger,
 ) {
     fun shutdown(timeout: Duration? = null) {
-        val limit = timeout ?: 10.seconds
-        try {
-            runBlocking {
-                withTimeout(limit) {
-                    client.wakeup()
-                    closeSignal.complete()
-                    poller.stop().await()
-                    committer.stop().await()
-                    client.close().await()
-                }
+        runBlocking {
+            Either.catching(timeout ?: 10.seconds) {
+                client.wakeup()
+                closeSignal.complete()
+                poller.stop().await()
+                committer.stop().await()
+                client.close().await()
             }
-        } catch (e: TimeoutCancellationException) {
-            val wrapped = TimeoutExpired("$instanceId shutdown timed out", e)
-            log.kafka.terminatedUnexpectedly(instanceId, wrapped)
-            client.wakeup()
-            runBlocking { client.close(3.seconds).await() }
-        } catch (e: Exception) {
-            val wrapped = TimeoutExpired("$instanceId shutdown timed out", e)
-            log.kafka.terminatedUnexpectedly(instanceId, wrapped)
+        }.onLeft { issue ->
+            log.kafka.terminatedUnexpectedly(instanceId, issue)
             client.wakeup()
             runBlocking { client.close(3.seconds).await() }
         }

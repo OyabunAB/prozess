@@ -1,5 +1,6 @@
 package se.oyabun.prozess
 
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -12,6 +13,7 @@ import se.oyabun.aelv.None
 import se.oyabun.aelv.One
 import se.oyabun.aelv.Policy
 import se.oyabun.aelv.Sink
+import se.oyabun.aelv.Failure
 import se.oyabun.aelv.Success
 import se.oyabun.aelv.await
 import se.oyabun.aelv.concatMap
@@ -56,22 +58,21 @@ internal class BufferedPoller(
 
     override fun start() {
         if (!running.compareAndSet(false, true)) throw PollerAlreadyRunning("$instanceId already running")
-        job = scope.launch {
-            try {
-                while (running.get()) {
-                    val result = client.poll(pollInterval).retry(retryPolicy).await()
-                    if (result is Success) {
-                        val records = result.value
-                        if (records.isNotEmpty()) {
-                            log.kafka.polled(instanceId, records.size)
-                            records.forEach { buffer.offer(it) }
-                        }
+        val exceptionHandler = CoroutineExceptionHandler { _, cause ->
+            signalCompletion(cause)
+        }
+        job = scope.launch(exceptionHandler) {
+            while (running.get()) {
+                val result = client.poll(pollInterval).retry(retryPolicy).await()
+                if (result is Success) {
+                    val records = result.value
+                    if (records.isNotEmpty()) {
+                        log.kafka.polled(instanceId, records.size)
+                        records.forEach { buffer.offer(it) }
                     }
                 }
-                signalCompletion()
-            } catch (e: Exception) {
-                signalCompletion(e)
             }
+            signalCompletion()
         }
         scope.launch {
             shutdownSink.asMany().first()
@@ -92,13 +93,23 @@ internal class BufferedPoller(
     override fun pause() {
         if (!running.get()) throw PollerNotRunning("$instanceId is not running")
         val current = assignments()
-        if (current.isNotEmpty()) runBlocking { client.pause(current).await() }
+        if (current.isNotEmpty()) runBlocking {
+            when (val result = client.pause(current).await()) {
+                is Failure -> log.kafka.terminatedUnexpectedly("$instanceId-pause", result.value)
+                is Success -> Unit
+            }
+        }
     }
 
     override fun resume() {
         if (!running.get()) throw PollerNotRunning("$instanceId is not running")
         val current = assignments()
-        if (current.isNotEmpty()) runBlocking { client.resume(current).await() }
+        if (current.isNotEmpty()) runBlocking {
+            when (val result = client.resume(current).await()) {
+                is Failure -> log.kafka.terminatedUnexpectedly("$instanceId-resume", result.value)
+                is Success -> Unit
+            }
+        }
     }
 
     override val isRunning: Boolean get() = running.get()
