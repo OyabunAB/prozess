@@ -34,6 +34,7 @@ interface Committer {
     fun seedOffsets(offsets: Offsets)
     val positions: Many<Position>
     val processedOffsets: Offsets
+    val committedOffsets: Many<Offsets>
     fun start()
     fun stop(): None<Unit>
 }
@@ -50,17 +51,19 @@ internal class BufferedCommitter(
     private val maxBatchTime: kotlin.time.Duration = 1.seconds,
 ) : Committer {
 
-    private val processedOffsetsRef = KAtomicReference<Offsets>(emptyMap())
-    private val positionSink        = Sinks.replay<Position>()
-    private val doneSink            = Sinks.broadcast<Unit>()
-    private val running             = AtomicBoolean(false)
-    private val dispatcher          = newSingleThreadContext("$instanceId-committer")
-    private val scope               = CoroutineScope(Dispatchers.Default + SupervisorJob())
-    private val noopJob             = Job().also { it.cancel() }
-    private val job                 = AtomicReference<Job>(noopJob)
+    private val processedOffsetsRef  = KAtomicReference<Offsets>(emptyMap())
+    private val positionSink         = Sinks.replay<Position>()
+    private val committedOffsetsSink = Sinks.replayLast<Offsets>(1)
+    private val doneSink             = Sinks.broadcast<Unit>()
+    private val running              = AtomicBoolean(false)
+    private val dispatcher           = newSingleThreadContext("$instanceId-committer")
+    private val scope                = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val noopJob              = Job().also { it.cancel() }
+    private val job                  = AtomicReference<Job>(noopJob)
 
     override val processedOffsets: Offsets get() = processedOffsetsRef.load()
     override val positions: Many<Position>  get() = positionSink.asMany()
+    override val committedOffsets: Many<Offsets> get() = committedOffsetsSink.asMany()
 
     override fun seedOffsets(offsets: Offsets) {
         processedOffsetsRef.update { it + offsets }
@@ -88,7 +91,10 @@ internal class BufferedCommitter(
                     val latest  = offsets.mapValues { (_, v) -> v.max() + 1 }
                     client.commit(latest, "$instanceId@${Clock.System.now()}")
                         .doOnError { cause -> log.kafka.commitFailed(instanceId, latest.keys, cause.cause ?: cause) }
-                        .doOnNext { log.kafka.committed(instanceId, latest.keys) }
+                        .doOnNext { committed ->
+                            log.kafka.committed(instanceId, latest.keys)
+                            committedOffsetsSink.tryEmit(committed)
+                        }
                         .withRetries(instanceId, log)
                         .flatMapMany { Many.empty<Unit>() }
                 }

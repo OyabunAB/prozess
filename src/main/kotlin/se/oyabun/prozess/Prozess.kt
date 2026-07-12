@@ -2,6 +2,7 @@ package se.oyabun.prozess
 
 import kotlinx.coroutines.runBlocking
 import se.oyabun.aelv.Failure
+import se.oyabun.aelv.Many
 import se.oyabun.aelv.Success
 import se.oyabun.aelv.await
 import kotlin.time.Duration
@@ -33,6 +34,9 @@ object Prozess {
         fun start(from: StartOffset = StartOffset.Latest, until: EndOffset = EndOffset.Continuous)
         fun shutdown()
         val isDisposed: Boolean
+        val processedOffsets: Offsets
+        val positions: Many<Position>
+        val committedOffsets: Many<Offsets>
         fun pause()
         fun resume()
         fun hasNoAssignments(): Boolean
@@ -70,6 +74,9 @@ object Prozess {
         override fun start(from: StartOffset, until: EndOffset) = delegate.start(from, until)
         override fun shutdown() = delegate.shutdown()
         override val isDisposed: Boolean get() = delegate.isDisposed
+        override val processedOffsets: Offsets get() = delegate.processedOffsets
+        override val positions: Many<Position> get() = delegate.positions
+        override val committedOffsets: Many<Offsets> get() = delegate.committedOffsets
         override fun pause() = delegate.pause()
         override fun resume() = delegate.resume()
         override fun hasNoAssignments(): Boolean = delegate.hasNoAssignments()

@@ -10,6 +10,11 @@ import org.testcontainers.kafka.KafkaContainer
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.runBlocking
+import se.oyabun.aelv.await
+import se.oyabun.aelv.filter
+import se.oyabun.aelv.take
+import se.oyabun.aelv.toList
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -92,10 +97,12 @@ class RebalanceKafkaTests {
                 allDone.countDown()
             }
             consumerA.start(from = StartOffset.Earliest)
-            assertTrue(
-                firstDone.await(30, TimeUnit.SECONDS),
-                "Consumer A did not process first batch",
-            )
+            assertTrue(firstDone.await(30, TimeUnit.SECONDS), "Consumer A did not process first batch")
+            runBlocking {
+                consumerA.committedOffsets
+                    .filter { it.values.sum() >= 10L }
+                    .take(1).toList().await()
+            }
 
             val consumerB = stringConsumer(
                 ConsumerConfig(bootstrapServers, groupId, setOf(topicName)),

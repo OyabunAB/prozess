@@ -152,6 +152,7 @@ class ShutdownCoordinatorTest {
             override fun seedOffsets(offsets: Offsets) = error("unexpected")
             override val positions: Many<Position> get() = error("unexpected")
             override val processedOffsets: Offsets get() = error("unexpected")
+            override val committedOffsets: Many<Offsets> get() = error("unexpected")
             override fun start() = error("unexpected")
             override fun stop(): None<Unit> = None.defer { onStop() }
         }

@@ -31,6 +31,7 @@ import se.oyabun.prozess.StartOffset.Latest
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
+import kotlin.concurrent.atomics.fetchAndUpdate
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
@@ -114,11 +115,12 @@ class StreamingConsumer<M : Any>(
         incomingFeed(sync, closeSignal.asMany(), from, until)
             .groupBy(
                 keySelector  = { received: Received -> received.position.partition },
-                groupHandler = { _, group -> processor.process(group) },
+                groupHandler = { _, group ->
+                    processor.process(group).concatMap { position ->
+                        One.defer { committer.markProcessed(position) }.flatMapMany { Many.empty() }
+                    }
+                },
             )
-            .concatMap { position ->
-                One.defer { committer.markProcessed(position); position }.asMany()
-            }
             .drain({}, {})
     }
 
@@ -246,6 +248,10 @@ class StreamingConsumer<M : Any>(
         is CatchUp              -> Many.empty<Received>().delaySubscription(complete)
         is EndOffset.Continuous -> Many.never()
     }
+
+    val processedOffsets: Offsets get() = committer.processedOffsets
+    val positions: Many<Position> get() = committer.positions
+    val committedOffsets: Many<Offsets> get() = committer.committedOffsets
 
     fun hasNoAssignments(): Boolean = partitionManager.assignments().isEmpty()
 
