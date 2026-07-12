@@ -16,7 +16,7 @@ and Vert.x Kafka Client 4.5.14.
 
 Run benchmarks locally:
 
-```
+```bash
 ./gradlew jmhJar
 java -jar build/libs/prozess-*-jmh.jar -wi 3 -i 5 -f 1 -tu s -w 10s -r 10s
 ```
@@ -87,8 +87,8 @@ high watermark. Spring Kafka and Vert.x have no automatic backpressure.
 | Framework | ops/s | Heap alloc/op | Bounded? |
 |---|---:|---:|---|
 | prozess | 0.016 | **68 MB** | Automatic — poller pauses at high watermark |
-| Spring Kafka | 0.018 | 78 MB | manual — Manual only — `container.pause()` |
-| Vert.x Kafka | 0.020 | 78 MB | manual — Manual only — `consumer.pause()` |
+| Spring Kafka | 0.018 | 78 MB | manual — `container.pause()` |
+| Vert.x Kafka | 0.020 | 78 MB | manual — `consumer.pause()` |
 
 **Key finding:** prozess allocates ~15% less heap under a slow consumer because the
 poller is automatically paused when the buffer fills. Spring Kafka and Vert.x

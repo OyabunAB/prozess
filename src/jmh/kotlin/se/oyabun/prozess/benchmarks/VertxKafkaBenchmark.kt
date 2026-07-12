@@ -40,8 +40,8 @@ import java.util.concurrent.TimeUnit
 @State(Scope.Thread)
 open class VertxKafkaBenchmark {
 
-    private val infra  = KafkaInfrastructure()
-    private lateinit var vertx: Vertx
+    private val infra = KafkaInfrastructure()
+    private var vertx: Vertx = Vertx.vertx()
 
     @Setup(Level.Trial)
     fun setup() {

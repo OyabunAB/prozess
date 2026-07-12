@@ -59,9 +59,10 @@ open class RawKafkaBenchmark {
             put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer::class.java.name)
         }
         var consumed = 0
+        val deadline = System.currentTimeMillis() + 120_000
         KafkaConsumer<String, String>(props).use { consumer ->
             consumer.subscribe(listOf(BENCHMARK_TOPIC))
-            while (consumed < RECORD_COUNT) {
+            while (consumed < RECORD_COUNT && System.currentTimeMillis() < deadline) {
                 val records = consumer.poll(Duration.ofMillis(500))
                 consumed += records.count()
             }

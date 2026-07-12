@@ -41,6 +41,7 @@ import java.time.Duration
 import java.util.Properties
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.time.Duration.Companion.milliseconds
@@ -92,7 +93,7 @@ open class GroupedOrderedBenchmark {
         )
         val consumer = StreamingConsumer(config, processor)
         consumer.start()
-        latch.await()
+        latch.await(120, TimeUnit.SECONDS)
         consumer.shutdown()
         return RECORD_COUNT
     }

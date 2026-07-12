@@ -35,6 +35,7 @@ import se.oyabun.prozess.ReceivedMessage.Tombstone as ReceivedTombstone
 import se.oyabun.prozess.StartOffset
 import se.oyabun.prozess.StreamingConsumer
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.time.Duration.Companion.milliseconds
 
 @BenchmarkMode(Mode.Throughput)
@@ -76,7 +77,7 @@ open class ProzessBenchmark {
         )
         val consumer = StreamingConsumer(config, processor)
         consumer.start()
-        latch.await()
+        latch.await(120, TimeUnit.SECONDS)
         consumer.shutdown()
         return RECORD_COUNT
     }

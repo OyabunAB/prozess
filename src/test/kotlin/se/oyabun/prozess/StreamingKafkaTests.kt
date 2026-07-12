@@ -37,7 +37,7 @@ class StreamingKafkaTests {
             val producer = StreamingProducer<String>(config) { it.toByteArray() }
             val messages = (1..10).map { "msg-$it" }
             Verify.that(producer.sendAll(Many.from(messages), key = { it }).toList())
-                .matchesNext { assertTrue(it.containsAll(messages)) }
+                .matchesNext { assertEquals(messages.sorted(), it.sorted()) }
                 .completesNormally()
             runBlocking { producer.close().await() }
         }

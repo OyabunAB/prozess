@@ -60,9 +60,10 @@ class ReceivedBufferTest {
         val buffer = InMemoryReceivedBuffer()
         val p = Partition(0, Topic("topic"))
         val record = Received(ReceivedKey.Value("k"), ReceivedMessage.Data("v".toByteArray()), Position(p, 0))
-        val sub = buffer.asMany().drain(onNext = { r -> assertEquals(record, r) }, onError = {})
-        runBlocking { buffer.offer(record) }
-        sub.cancel()
+        Verify.that(buffer.asMany().take(1))
+            .runs { runBlocking { buffer.offer(record) } }
+            .emitsNext(record)
+            .completesNormally()
     }
 
 
