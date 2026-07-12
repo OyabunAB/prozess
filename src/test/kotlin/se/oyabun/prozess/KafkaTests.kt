@@ -289,6 +289,92 @@ class KafkaTests {
             assertEquals("content-type", headers[1].key)
             assertTrue(headers[1].value.contentEquals("json".toByteArray()))
         }
+
+        @Test
+        fun `sendAll collection sends all messages and returns them`() {
+            val topicName = topic(bootstrapServers)
+            val groupId = groupId()
+            val messages = (1..5).map { "batch-$it" }
+
+            val producer = Prozess.producer<String>(
+                ProducerConfig(bootstrapServers, Topic(topicName)),
+                { it.toByteArray() },
+            )
+            val returned = producer.sendAll(messages, key = { it })
+            producer.close()
+
+            assertEquals(messages.sorted(), returned.sorted())
+
+            val received = mutableListOf<String>()
+            val latch = CountDownLatch(messages.size)
+            val consumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, msg ->
+                received.add(msg)
+                latch.countDown()
+            }
+            consumer.start(from = StartOffset.Earliest)
+            assertTrue(latch.await(5, TimeUnit.SECONDS), "timed out waiting for batch messages")
+            consumer.shutdown()
+
+            assertEquals(messages.sorted(), received.sorted())
+        }
+
+        @Test
+        fun `sendAll vararg sends all messages and returns them`() {
+            val topicName = topic(bootstrapServers)
+            val groupId = groupId()
+
+            val producer = Prozess.producer<String>(
+                ProducerConfig(bootstrapServers, Topic(topicName)),
+                { it.toByteArray() },
+            )
+            val returned = producer.sendAll("alpha", "beta", "gamma", key = { it })
+            producer.close()
+
+            assertEquals(listOf("alpha", "beta", "gamma").sorted(), returned.sorted())
+
+            val received = mutableListOf<String>()
+            val latch = CountDownLatch(3)
+            val consumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, msg ->
+                received.add(msg)
+                latch.countDown()
+            }
+            consumer.start(from = StartOffset.Earliest)
+            assertTrue(latch.await(5, TimeUnit.SECONDS), "timed out waiting for vararg messages")
+            consumer.shutdown()
+
+            assertEquals(listOf("alpha", "beta", "gamma").sorted(), received.sorted())
+        }
+
+        @Test
+        fun `sendAll attaches headers to all messages`() {
+            val topicName = topic(bootstrapServers)
+            val groupId = groupId()
+            val messages = listOf("x", "y")
+
+            val producer = Prozess.producer<String>(
+                ProducerConfig(bootstrapServers, Topic(topicName)),
+                { it.toByteArray() },
+            )
+            producer.sendAll(messages, key = { it }, headersProvider = { listOf(Header("src", it.toByteArray())) })
+            producer.close()
+
+            val receivedHeaders = mutableListOf<Pair<String, Headers>>()
+            val latch = CountDownLatch(messages.size)
+            val consumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { received, msg ->
+                receivedHeaders.add(msg to received.headers)
+                latch.countDown()
+            }
+            consumer.start(from = StartOffset.Earliest)
+            assertTrue(latch.await(5, TimeUnit.SECONDS), "timed out waiting for messages with headers")
+            consumer.shutdown()
+
+            assertEquals(2, receivedHeaders.size)
+            receivedHeaders.forEach { (msg, headers) ->
+                assertEquals(1, headers.size)
+                assertEquals("src", headers[0].key)
+                assertTrue(headers[0].value.contentEquals(msg.toByteArray()))
+            }
+        }
     }
 
     @Nested

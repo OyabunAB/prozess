@@ -6,6 +6,7 @@ import se.oyabun.aelv.Failure
 import se.oyabun.aelv.Many
 import se.oyabun.aelv.Success
 import se.oyabun.aelv.await
+import se.oyabun.aelv.toList
 import kotlin.time.Duration
 
 object Prozess {
@@ -23,6 +24,32 @@ object Prozess {
 
     interface Producer<M> {
         fun send(key: String, value: M, partition: Int? = null, timestamp: Long? = null, headers: Headers = emptyList()): Long
+
+        /**
+         * Sends all [messages] to Kafka and blocks until every message has been acknowledged.
+         *
+         * Messages are grouped by extracted key and sent in order within each key group,
+         * preserving per-key ordering guarantees. Returns the original messages as a list
+         * in the order they were delivered downstream (stable within each key group;
+         * interleaved across key groups).
+         *
+         * @param messages the messages to send.
+         * @param key function that extracts the Kafka record key from a message.
+         * @param headersProvider optional function that extracts Kafka headers from a message.
+         * @return the sent messages (pass-through).
+         * @throws SendFailure if any message fails to send.
+         */
+        fun sendAll(messages: Collection<M>, key: KeyExtraction<M>, headersProvider: HeadersProvider<M> = { emptyList() }): List<M>
+
+        /**
+         * Sends all [messages] to Kafka and blocks until every message has been acknowledged.
+         *
+         * Convenience vararg overload — delegates to [sendAll] with a [Collection].
+         *
+         * @see sendAll
+         */
+        fun sendAll(vararg messages: M, key: KeyExtraction<M>, headersProvider: HeadersProvider<M> = { emptyList() }): List<M> =
+            sendAll(messages.toList(), key, headersProvider)
         fun initTransactions()
         fun beginTransaction()
         fun commitTransaction()
@@ -93,6 +120,13 @@ object Prozess {
             return when (result) {
                 is Success -> result.value
                 is Failure -> throw SendFailure("$instance send failed", RuntimeException(result.value.message))
+            }
+        }
+        override fun sendAll(messages: Collection<M>, key: KeyExtraction<M>, headersProvider: HeadersProvider<M>): List<M> {
+            val result = runBlocking { delegate.sendAll(Many.from(messages), key, headersProvider).toList().await() }
+            return when (result) {
+                is Success -> result.value
+                is Failure -> throw SendFailure("$instance sendAll failed", RuntimeException(result.value.message))
             }
         }
         override fun sendOffsetsToTransaction(offsets: Offsets, member: GroupMember) { runBlocking { delegate.sendOffsetsToTransaction(offsets, member).await() } }

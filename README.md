@@ -164,6 +164,71 @@ The Committer (`BufferedCommitter`) owns the committed offsets state and runs a 
 - Retries commits indefinitely on transient failures; the outer `retryWhen` restarts the pipeline on unexpected errors
 - Owns `processedOffsets` state — no longer managed by `StreamingConsumer`
 
-## Producer Architecture
+## Producer
 
-(Single-path — serialises to Kafka via `KafkaProducer.send()` on bounded-elastic scheduler.)
+Create a producer with `Prozess.producer()`. Each instance is bound to a single topic via `ProducerConfig`.
+
+```kotlin
+val producer = Prozess.producer<MyEvent>(
+    config = ProducerConfig(bootstrapServers = "localhost:9092", topic = Topic("events")),
+    serializer = { event -> Json.encodeToByteArray(event) },
+)
+```
+
+### Sending messages
+
+**Single message** — blocks until the broker acknowledges and returns the written offset:
+
+```kotlin
+val offset: Long = producer.send(key = event.id, value = event)
+```
+
+**Batch — collection** — sends all messages and blocks until all are acknowledged. Returns the
+sent messages as a list (pass-through):
+
+```kotlin
+val sent: List<MyEvent> = producer.sendAll(events, key = { it.id })
+```
+
+**Batch — vararg** — convenience overload for ad-hoc sends:
+
+```kotlin
+producer.sendAll(eventA, eventB, eventC, key = { it.id })
+```
+
+Both `sendAll` overloads accept an optional `headersProvider` to attach per-message Kafka headers:
+
+```kotlin
+producer.sendAll(events, key = { it.id }, headersProvider = { listOf(Header("trace-id", traceId.toByteArray())) })
+```
+
+Messages are grouped by extracted key and sent in order within each key group, preserving
+per-key ordering. The underlying `StreamingProducer.sendAll()` is available for reactive
+pipelines that already work with `Many<M>`.
+
+### Transactions
+
+```kotlin
+producer.initTransactions()
+producer.beginTransaction()
+try {
+    producer.send("k", event)
+    producer.commitTransaction()
+} catch (e: Exception) {
+    producer.abortTransaction()
+}
+producer.close()
+```
+
+Configure with `TransactionalConfig.Enabled(id = "my-transactional-id")` in `ProducerConfig`.
+Transactional producers use `acks=all` automatically.
+
+### Multiple topics
+
+`ProducerConfig` is a `data class` — copy it to create producers for different topics without
+duplicating connection settings:
+
+```kotlin
+val base = ProducerConfig(bootstrapServers = "localhost:9092", topic = Topic("events"))
+val dlqProducer = Prozess.producer<MyEvent>(base.copy(topic = Topic("events-dlq")), serializer)
+```
