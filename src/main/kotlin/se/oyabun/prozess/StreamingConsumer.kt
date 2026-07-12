@@ -57,10 +57,8 @@ class StreamingConsumer<M : Any>(
 
     val events: Many<ConsumerEvent> = eventSink.asMany()
 
-    private val eventCallbacks = java.util.concurrent.CopyOnWriteArrayList<(ConsumerEvent) -> Unit>()
-
     fun onEvent(callback: (ConsumerEvent) -> Unit) {
-        eventCallbacks.add(callback)
+        events.drain(onNext = { callback(it) }, onError = {})
     }
 
     private val buffer = InMemoryReceivedBuffer(
@@ -109,6 +107,7 @@ class StreamingConsumer<M : Any>(
         check(started.compareAndSet(false, true)) { "$instanceId start() called more than once" }
         poller.start()
         committer.start()
+        committer.committedOffsets.drain({ emitEvent(ConsumerEvent.Committed(it)) }, {})
         emitEvent(ConsumerEvent.Started)
         val complete = completionSignal()
         val sync     = syncSignal(until, complete)
@@ -128,7 +127,6 @@ class StreamingConsumer<M : Any>(
         if (!disposed.compareAndSet(false, true)) return
         emitEvent(ConsumerEvent.Stopped)
         eventSink.complete()
-        eventCallbacks.clear()
         ShutdownCoordinator(
             client      = client,
             closeSignal = closeSignal,
@@ -153,10 +151,7 @@ class StreamingConsumer<M : Any>(
         emitEvent(ConsumerEvent.Resumed)
     }
 
-    private fun emitEvent(event: ConsumerEvent) {
-        eventSink.tryEmit(event)
-        eventCallbacks.forEach { it(event) }
-    }
+    private fun emitEvent(event: ConsumerEvent) = eventSink.tryEmit(event)
 
     private fun incomingFeed(
         sync: Many<Received>,
@@ -248,10 +243,6 @@ class StreamingConsumer<M : Any>(
         is CatchUp              -> Many.empty<Received>().delaySubscription(complete)
         is EndOffset.Continuous -> Many.never()
     }
-
-    val processedOffsets: Offsets get() = committer.processedOffsets
-    val positions: Many<Position> get() = committer.positions
-    val committedOffsets: Many<Offsets> get() = committer.committedOffsets
 
     fun hasNoAssignments(): Boolean = partitionManager.assignments().isEmpty()
 

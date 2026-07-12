@@ -1,6 +1,7 @@
 package se.oyabun.prozess
 
 import kotlinx.coroutines.runBlocking
+import kotlin.reflect.KClass
 import se.oyabun.aelv.Failure
 import se.oyabun.aelv.Many
 import se.oyabun.aelv.Success
@@ -34,15 +35,14 @@ object Prozess {
         fun start(from: StartOffset = StartOffset.Latest, until: EndOffset = EndOffset.Continuous)
         fun shutdown()
         val isDisposed: Boolean
-        val processedOffsets: Offsets
-        val positions: Many<Position>
-        val committedOffsets: Many<Offsets>
         fun pause()
         fun resume()
         fun hasNoAssignments(): Boolean
         fun position(partition: Partition): Long
         fun lag(partition: Partition): Long
         fun onEvent(callback: (ConsumerEvent) -> Unit)
+        fun <T : ConsumerEvent> onEvent(type: KClass<T>, callback: (T) -> Unit) =
+            onEvent { if (type.isInstance(it)) @Suppress("UNCHECKED_CAST") callback(it as T) }
     }
 
     private fun <M : Any> simpleDeserializer(deserializeBytes: (ByteArray) -> M): Deserializer<M> = { received ->
@@ -74,9 +74,6 @@ object Prozess {
         override fun start(from: StartOffset, until: EndOffset) = delegate.start(from, until)
         override fun shutdown() = delegate.shutdown()
         override val isDisposed: Boolean get() = delegate.isDisposed
-        override val processedOffsets: Offsets get() = delegate.processedOffsets
-        override val positions: Many<Position> get() = delegate.positions
-        override val committedOffsets: Many<Offsets> get() = delegate.committedOffsets
         override fun pause() = delegate.pause()
         override fun resume() = delegate.resume()
         override fun hasNoAssignments(): Boolean = delegate.hasNoAssignments()
@@ -192,3 +189,6 @@ object Prozess {
             wrap(config, processor, instance)
     }
 }
+
+inline fun <reified T : ConsumerEvent> Prozess.Consumer<*>.onEvent(noinline callback: (T) -> Unit) =
+    onEvent { if (it is T) callback(it) }

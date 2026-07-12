@@ -13,6 +13,7 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
 import se.oyabun.aelv.await
 import se.oyabun.aelv.filter
+import se.oyabun.aelv.map
 import se.oyabun.aelv.take
 import se.oyabun.aelv.toList
 import kotlin.test.assertEquals
@@ -96,13 +97,11 @@ class RebalanceKafkaTests {
                 firstDone.countDown()
                 allDone.countDown()
             }
+            val committed = CountDownLatch(1)
+            consumerA.onEvent(ConsumerEvent.Committed::class) { if (it.offsets.values.sum() >= 10L) committed.countDown() }
             consumerA.start(from = StartOffset.Earliest)
             assertTrue(firstDone.await(30, TimeUnit.SECONDS), "Consumer A did not process first batch")
-            runBlocking {
-                consumerA.committedOffsets
-                    .filter { it.values.sum() >= 10L }
-                    .take(1).toList().await()
-            }
+            assertTrue(committed.await(30, TimeUnit.SECONDS), "Offsets not committed to Kafka")
 
             val consumerB = stringConsumer(
                 ConsumerConfig(bootstrapServers, groupId, setOf(topicName)),

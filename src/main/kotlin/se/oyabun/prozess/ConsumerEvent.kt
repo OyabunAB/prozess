@@ -7,10 +7,11 @@ package se.oyabun.prozess
  * [Prozess.Consumer.onEvent] (blocking) to observe these transitions.
  */
 sealed interface ConsumerEvent {
-    data class Assigned(val partitions: Partitions) : ConsumerEvent
-    data class Revoked(val partitions: Partitions) : ConsumerEvent
-    data object Started : ConsumerEvent
-    data object Paused : ConsumerEvent
-    data object Resumed : ConsumerEvent
-    data object Stopped : ConsumerEvent
+    data class Assigned(val partitions: Partitions)  : ConsumerEvent
+    data class Revoked(val partitions: Partitions)   : ConsumerEvent
+    data class Committed(val offsets: Offsets)        : ConsumerEvent
+    data object Started  : ConsumerEvent
+    data object Paused   : ConsumerEvent
+    data object Resumed  : ConsumerEvent
+    data object Stopped  : ConsumerEvent
 }
