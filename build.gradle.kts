@@ -103,7 +103,7 @@ publishing {
     repositories {
         maven {
             name = "GitHubPackages"
-            url = uri("https://maven.pkg.github.com/oyabun/prozess")
+            url = uri("https://maven.pkg.github.com/OyabunAB/prozess")
             credentials {
                 username = System.getenv("GITHUB_ACTOR")
                 password = System.getenv("GITHUB_TOKEN")
