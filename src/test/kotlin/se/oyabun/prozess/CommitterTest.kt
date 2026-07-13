@@ -1,6 +1,7 @@
 package se.oyabun.prozess
 
 import kotlinx.coroutines.runBlocking
+import se.oyabun.aelv.first
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.assertThrows
@@ -58,14 +59,16 @@ class CommitterTest {
             maxBatchTime = 5.seconds,
         )
         c.start()
-        runBlocking {
+        val committed = runBlocking {
             c.markProcessed(Position(p0, 1L))
             c.markProcessed(Position(p0, 2L))
             c.markProcessed(Position(p0, 3L))
+            val offsets = c.committedOffsets.first()
             c.stop().await()
+            offsets
         }
-        assertFalse(fake.commits.isEmpty(), "Expected at least one commit")
-        assertEquals(mapOf(p0 to 4L), fake.commits.peek().first)
+        assertTrue(committed.isRight(), "Expected a committed offsets event")
+        assertEquals(mapOf(p0 to 4L), committed.rightOrNull())
     }
 
     @Test
