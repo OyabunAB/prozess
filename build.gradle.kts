@@ -34,6 +34,7 @@ dependencies {
     "jmhAnnotationProcessor"(libs.jmh.annprocess)
 }
 
+val isPublishable: Boolean = !version.toString().endsWith("-SNAPSHOT")
 val isRelease: Boolean = Regex("""^\d+\.\d+\.\d+$""").matches(version.toString())
 val ossrhUsername: String? = System.getenv("OSSRH_USERNAME")
 val ossrhPassword: String? = System.getenv("OSSRH_PASSWORD")
@@ -45,7 +46,7 @@ kotlin {
     compilerOptions { optIn.add("kotlin.time.ExperimentalTime") }
 }
 
-if (isRelease && signingKey != null) {
+if (isPublishable && signingKey != null) {
     signing {
         useInMemoryPgpKeys(signingKey, signingPassword)
         sign(publishing.publications["maven"])

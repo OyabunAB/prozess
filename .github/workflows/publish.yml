@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Version to publish (e.g. 0.1.0)
+        description: Version to publish (e.g. 0.1.0-rc.1)
         required: true
 
 jobs:
@@ -29,10 +29,8 @@ jobs:
           TAG="${{ github.event.release.tag_name }}"
           VERSION="${{ inputs.version }}"
           if [ -n "$TAG" ]; then
-            echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
             echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
           elif [ -n "$VERSION" ]; then
-            echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
             echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           else
             echo "error: no version provided" >&2
@@ -43,21 +41,27 @@ jobs:
         run: docker info
 
       - name: Run tests
-        run: ./gradlew test -Pversion=${{ steps.version.outputs.version }}
+        run: ./gradlew test
         env:
+          VERSION: ${{ steps.version.outputs.version }}
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TESTCONTAINERS_RYUK_DISABLED: "true"
 
       - name: Publish to GitHub Packages
-        run: ./gradlew publish -Pversion=${{ steps.version.outputs.version }}
+        run: ./gradlew publish
         env:
+          VERSION: ${{ steps.version.outputs.version }}
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
+          GPG_SIGNING_PASSWORD: ${{ secrets.GPG_SIGNING_PASSWORD }}
 
       - name: Publish to Maven Central
-        run: ./gradlew publishToSonatype closeAndReleaseSonatypeStagingRepository -Pversion=${{ steps.version.outputs.version }}
+        if: ${{ !contains(steps.version.outputs.version, '-') }}
+        run: ./gradlew publishToSonatype closeAndReleaseSonatypeStagingRepository
         env:
+          VERSION: ${{ steps.version.outputs.version }}
           OSSRH_USERNAME: ${{ secrets.OSSRH_USERNAME }}
           OSSRH_PASSWORD: ${{ secrets.OSSRH_PASSWORD }}
           GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
