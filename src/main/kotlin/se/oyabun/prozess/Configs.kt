@@ -5,7 +5,6 @@ import org.apache.kafka.clients.producer.ProducerConfig as ApacheProducerConfig
 import org.apache.kafka.common.serialization.ByteArrayDeserializer
 import org.apache.kafka.common.serialization.ByteArraySerializer
 import org.apache.kafka.common.serialization.StringDeserializer
-import org.apache.kafka.common.serialization.StringSerializer
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
@@ -41,7 +40,7 @@ data class ProducerConfig(
 
     internal fun toKafkaProperties(): Map<String, Any> = buildMap {
         put(ApacheProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers)
-        put(ApacheProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer::class.java.name)
+        put(ApacheProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer::class.java.name)
         put(ApacheProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer::class.java.name)
         when (transactional) {
             is TransactionalConfig.Disabled -> put(ApacheProducerConfig.ACKS_CONFIG, transactional.acks.value)

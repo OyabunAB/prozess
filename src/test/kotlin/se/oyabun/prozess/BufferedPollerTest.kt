@@ -157,6 +157,6 @@ class BufferedPollerTest {
         )
     }
 
-    private fun received(partition: Partition = Partition(0, Topic("test"))): Received =
-        Received(ReceivedKey.Value("key"), ReceivedMessage.Data(ByteArray(0)), Position(partition, 0L))
+    private fun received(partition: Partition = Partition(0, Topic("test"))): Received<ByteArray> =
+        Received(Key.Present("key".toByteArray()), ReceivedMessage.Data(ByteArray(0)), Position(partition, 0L))
 }

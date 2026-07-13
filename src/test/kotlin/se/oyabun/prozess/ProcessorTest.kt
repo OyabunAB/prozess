@@ -28,11 +28,12 @@ class ProcessorTest {
     private val p0 = Partition(0, topic)
 
     private fun received(partition: Partition, offset: Long, message: String = "msg-$offset") =
-        Received(ReceivedKey.Value("k-$offset"), ReceivedMessage.Data(message.toByteArray()), Position(partition, offset))
+        Received(Key.Present("k-$offset".toByteArray()), ReceivedMessage.Data(message.toByteArray()), Position(partition, offset))
 
     @Test
     fun `each processor emits position for each message`() {
-        val processor = DefaultProcessor.each<String>(
+        val processor = DefaultProcessor.each<Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = { r ->
                 when (val msg = r.message) {
                     is ReceivedMessage.Data -> DeserializationResult.Message(String(msg.bytes))
@@ -53,7 +54,8 @@ class ProcessorTest {
     @Test
     fun `each processor invokes handler with deserialized value`() {
         val processed = mutableListOf<String>()
-        val processor = DefaultProcessor.each<String>(
+        val processor = DefaultProcessor.each<Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = { r ->
                 when (val msg = r.message) {
                     is ReceivedMessage.Data -> DeserializationResult.Message(String(msg.bytes))
@@ -72,7 +74,8 @@ class ProcessorTest {
     @Test
     fun `each processor retries on transient failure then succeeds`() {
         var attempts = 0
-        val processor = DefaultProcessor.each<String>(
+        val processor = DefaultProcessor.each<Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = { r ->
                 when (val msg = r.message) {
                     is ReceivedMessage.Data -> DeserializationResult.Message(String(msg.bytes))
@@ -94,7 +97,8 @@ class ProcessorTest {
 
     @Test
     fun `batch processor emits positions for each message in batch`() {
-        val processor = DefaultProcessor.batch<String>(
+        val processor = DefaultProcessor.batch<Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = { r ->
                 when (val msg = r.message) {
                     is ReceivedMessage.Data -> DeserializationResult.Message(String(msg.bytes))
@@ -119,7 +123,8 @@ class ProcessorTest {
     @Test
     fun `batch processor invokes handler with deserialized batch`() {
         val batches = mutableListOf<List<String>>()
-        val processor = DefaultProcessor.batch<String>(
+        val processor = DefaultProcessor.batch<Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = { r ->
                 when (val msg = r.message) {
                     is ReceivedMessage.Data -> DeserializationResult.Message(String(msg.bytes))
@@ -140,7 +145,8 @@ class ProcessorTest {
     @Test
     fun `batch processor with duration flushes on timeout`() {
         val batches = mutableListOf<List<String>>()
-        val processor = DefaultProcessor.batch<String>(
+        val processor = DefaultProcessor.batch<Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = { r ->
                 when (val msg = r.message) {
                     is ReceivedMessage.Data -> DeserializationResult.Message(String(msg.bytes))
@@ -164,7 +170,8 @@ class ProcessorTest {
     @Test
     fun `batch retries on transient failure then succeeds`() {
         var attempts = 0
-        val processor = DefaultProcessor.batch<String>(
+        val processor = DefaultProcessor.batch<Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = { r ->
                 when (val msg = r.message) {
                     is ReceivedMessage.Data -> DeserializationResult.Message(String(msg.bytes))
@@ -247,7 +254,8 @@ class ProcessorTest {
     @Test
     fun `groupedEach processes messages grouped by key`() {
         val processed = mutableListOf<String>()
-        val processor = DefaultProcessor.groupedEach<String, String>(
+        val processor = DefaultProcessor.groupedEach<String, Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = { r ->
                 when (val msg = r.message) {
                     is ReceivedMessage.Data -> DeserializationResult.Message(String(msg.bytes))
@@ -272,7 +280,8 @@ class ProcessorTest {
 
     @Test
     fun `groupedEach with contiguous offset tracking emits final position`() {
-        val processor = DefaultProcessor.groupedEach<String, String>(
+        val processor = DefaultProcessor.groupedEach<String, Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = { r ->
                 when (val msg = r.message) {
                     is ReceivedMessage.Data -> DeserializationResult.Message(String(msg.bytes))
@@ -297,7 +306,8 @@ class ProcessorTest {
     @Test
     fun `groupedEach retries on transient failure then succeeds`() {
         var attempts = 0
-        val processor = DefaultProcessor.groupedEach<String, String>(
+        val processor = DefaultProcessor.groupedEach<String, Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = { r ->
                 when (val msg = r.message) {
                     is ReceivedMessage.Data -> DeserializationResult.Message(String(msg.bytes))
@@ -320,7 +330,8 @@ class ProcessorTest {
     @Test
     fun `groupedBatch processes messages in key-grouped batches`() {
         val batches = mutableListOf<List<String>>()
-        val processor = DefaultProcessor.groupedBatch<String, String>(
+        val processor = DefaultProcessor.groupedBatch<String, Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = { r ->
                 when (val msg = r.message) {
                     is ReceivedMessage.Data -> DeserializationResult.Message(String(msg.bytes))
@@ -346,7 +357,8 @@ class ProcessorTest {
 
     @Test
     fun `groupedBatch emits final position via tracker`() {
-        val processor = DefaultProcessor.groupedBatch<String, String>(
+        val processor = DefaultProcessor.groupedBatch<String, Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = { r ->
                 when (val msg = r.message) {
                     is ReceivedMessage.Data -> DeserializationResult.Message(String(msg.bytes))
@@ -373,7 +385,8 @@ class ProcessorTest {
     @Test
     fun `groupedBatch with duration flushes on timeout`() {
         val batches = mutableListOf<List<String>>()
-        val processor = DefaultProcessor.groupedBatch<String, String>(
+        val processor = DefaultProcessor.groupedBatch<String, Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = { r ->
                 when (val msg = r.message) {
                     is ReceivedMessage.Data -> DeserializationResult.Message(String(msg.bytes))
@@ -395,7 +408,8 @@ class ProcessorTest {
     @Test
     fun `each retries deserialization failure`() {
         var attempts = 0
-        val processor = DefaultProcessor.each<String>(
+        val processor = DefaultProcessor.each<Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = {
                 attempts++
                 if (attempts < 2) throw RuntimeException("deserialize fail")
@@ -416,7 +430,8 @@ class ProcessorTest {
     @Test
     fun `groupedEach retries deserialization failure`() {
         var attempts = 0
-        val processor = DefaultProcessor.groupedEach<String, String>(
+        val processor = DefaultProcessor.groupedEach<String, Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = {
                 attempts++
                 if (attempts < 2) throw RuntimeException("deserialize fail")
@@ -437,7 +452,8 @@ class ProcessorTest {
 
     @Test
     fun `each completes on empty flux`() {
-        val processor = DefaultProcessor.each<String>(
+        val processor = DefaultProcessor.each<Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = { r ->
                 when (val msg = r.message) {
                     is ReceivedMessage.Data -> DeserializationResult.Message(String(msg.bytes))
@@ -452,7 +468,8 @@ class ProcessorTest {
 
     @Test
     fun `batch completes on empty flux`() {
-        val processor = DefaultProcessor.batch<String>(
+        val processor = DefaultProcessor.batch<Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = { r ->
                 when (val msg = r.message) {
                     is ReceivedMessage.Data -> DeserializationResult.Message(String(msg.bytes))
@@ -469,7 +486,8 @@ class ProcessorTest {
 
     @Test
     fun `groupedEach completes on empty flux`() {
-        val processor = DefaultProcessor.groupedEach<String, String>(
+        val processor = DefaultProcessor.groupedEach<String, Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = { r ->
                 when (val msg = r.message) {
                     is ReceivedMessage.Data -> DeserializationResult.Message(String(msg.bytes))
@@ -485,7 +503,8 @@ class ProcessorTest {
 
     @Test
     fun `each accepts maxConcurrency parameter`() {
-        val processor = DefaultProcessor.each<String>(
+        val processor = DefaultProcessor.each<Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = { r ->
                 when (val msg = r.message) {
                     is ReceivedMessage.Data -> DeserializationResult.Message(String(msg.bytes))
@@ -503,7 +522,8 @@ class ProcessorTest {
     @Test
     fun `each acknowledges tombstone without calling handler`() {
         val processed = mutableListOf<String>()
-        val processor = DefaultProcessor.each<String>(
+        val processor = DefaultProcessor.each<Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = { DeserializationResult.Tombstone },
             handler = { processed.add(it.value) },
         )
@@ -516,7 +536,8 @@ class ProcessorTest {
     @Test
     fun `each acknowledges poison pill without calling handler`() {
         val processed = mutableListOf<String>()
-        val processor = DefaultProcessor.each<String>(
+        val processor = DefaultProcessor.each<Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = { DeserializationResult.PoisonPill("bad data") },
             handler = { processed.add(it.value) },
         )
@@ -528,7 +549,8 @@ class ProcessorTest {
 
     @Test
     fun `each tombstone and poison pill positions forward through batch`() {
-        val processor = DefaultProcessor.batch<String>(
+        val processor = DefaultProcessor.batch<Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = {
                 when {
                     it.position.offset == 1L -> DeserializationResult.Tombstone
@@ -556,7 +578,8 @@ class ProcessorTest {
     @Test
     fun `groupedEach acknowledges tombstones without entering groupBy`() {
         val processed = mutableListOf<String>()
-        val processor = DefaultProcessor.groupedEach<String, String>(
+        val processor = DefaultProcessor.groupedEach<String, Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = {
                 if (it.position.offset == 1L) DeserializationResult.Tombstone
                 else when (val msg = it.message) {

@@ -27,7 +27,7 @@ interface KafkaClient : ShutdownableClient {
 
     fun endOffsetOf(partition: Partition): One<Long>
 
-    fun poll(timeout: Duration = 100.milliseconds): One<List<Received>>
+    fun poll(timeout: Duration = 100.milliseconds): One<List<Received<ByteArray>>>
 
     fun pause(partitions: Partitions): One<Partitions>
 

@@ -1,6 +1,5 @@
 package se.oyabun.prozess
 
-import kotlinx.coroutines.runBlocking
 import org.apache.kafka.clients.consumer.OffsetAndMetadata
 import org.apache.kafka.clients.producer.KafkaProducer
 import org.apache.kafka.common.TopicPartition
@@ -16,23 +15,27 @@ import java.util.concurrent.atomic.AtomicBoolean
 @Suppress("OPT_IN_USAGE")
 class StreamingProducer<M : Any>(
     val config: ProducerConfig,
-    instance: String? = "producer",
+    instance: String = shortId(),
+    /** Used for per-key grouping in [sendAll]; null when unkeyed. */
+    private val keyExtractor: ((M) -> Any)?,
+    /** Serializes the extracted key to bytes for the Kafka record; null when unkeyed. */
+    private val keyBytes: ((M) -> ByteArray)?,
+    private val headerEnricher: Prozess.HeaderEnricher<M> = { emptyList() },
+    private val partitionExtractor: Prozess.PartitionExtractor<M> = { Prozess.NO_PARTITION },
+    private val timestampExtractor: Prozess.TimestampExtractor<M> = { Prozess.NO_TIMESTAMP },
     private val serializer: Prozess.Serializer<M>,
 ) {
     private val log        = Logging.logger { }
     private val instanceId = "[$instance ${config.topic} producer]"
-    private val delegate   = KafkaProducer<String, ByteArray>(config.toKafkaProperties())
+    private val delegate   = KafkaProducer<ByteArray?, ByteArray>(config.toKafkaProperties())
     private val dispatcher = kotlinx.coroutines.newSingleThreadContext("$instanceId-producer")
     private val closed     = AtomicBoolean(false)
 
-    fun send(
-        key: String,
-        value: M,
-        partition: Int? = null,
-        timestamp: Long? = null,
-        headers: Headers = emptyList(),
-    ): One<Long> = One.create<Long> { success, failure ->
-        val kafkaHeaders = headers.map { RecordHeader(it.key, it.value) }
+    fun send(value: M): One<Long> = One.create<Long> { success, failure ->
+        val key: ByteArray?  = keyBytes?.invoke(value)
+        val partition: Int?  = partitionExtractor(value).takeUnless { it == Prozess.NO_PARTITION }
+        val timestamp: Long? = timestampExtractor(value).takeUnless { it == Prozess.NO_TIMESTAMP }
+        val kafkaHeaders     = headerEnricher(value).map { RecordHeader(it.key, it.value) }
         delegate.send(
             org.apache.kafka.clients.producer.ProducerRecord(
                 config.topic.name, partition, timestamp, key, serializer(value), kafkaHeaders,
@@ -43,19 +46,20 @@ class StreamingProducer<M : Any>(
         }
     }.withRetries(instanceId, log)
 
-    fun sendAll(
-        source: Many<M>,
-        key: Prozess.KeyExtraction<M>,
-        headersProvider: Prozess.HeadersProvider<M> = { emptyList() },
-    ): Many<M> = source.groupBy(
-        keySelector  = { m: M -> key(m) },
-        groupHandler = { _, group: Many<M> ->
-            group.concatMap { element: M ->
-                send(key(element), element, headers = headersProvider(element))
-                    .flatMapMany { Many.items(element) }
-            }
-        },
-    )
+    fun sendAll(source: Many<M>): Many<M> = if (keyExtractor != null) {
+        source.groupBy(
+            keySelector  = { m: M -> keyExtractor(m) },
+            groupHandler = { _, group: Many<M> ->
+                group.concatMap { element: M ->
+                    send(element).flatMapMany { Many.items(element) }
+                }
+            },
+        )
+    } else {
+        source.concatMap { element: M ->
+            send(element).flatMapMany { Many.items(element) }
+        }
+    }
 
     fun initTransactions(): None<Unit>  = None.defer(dispatcher) { delegate.initTransactions() }
     fun beginTransaction(): None<Unit>  = None.defer(dispatcher) { delegate.beginTransaction() }

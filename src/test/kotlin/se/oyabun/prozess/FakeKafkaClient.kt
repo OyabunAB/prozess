@@ -11,7 +11,7 @@ internal class FakeKafkaClient : KafkaClient {
 
     override val pollInterval: Duration = 100.milliseconds
 
-    private val pollQueue = ConcurrentLinkedQueue<List<Received>>()
+    private val pollQueue = ConcurrentLinkedQueue<List<Received<ByteArray>>>()
     private var pollError = RuntimeException()
     private var pollErrorRemaining = 0
     private val topicsToPartitions = mutableMapOf<String, Partitions>()
@@ -31,7 +31,7 @@ internal class FakeKafkaClient : KafkaClient {
 
     private val positions = mutableMapOf<Partition, Long>()
 
-    fun queuePollResults(vararg results: List<Received>) {
+    fun queuePollResults(vararg results: List<Received<ByteArray>>) {
         results.forEach { pollQueue.add(it) }
     }
 
@@ -93,13 +93,13 @@ internal class FakeKafkaClient : KafkaClient {
     override fun endOffsetOf(partition: Partition): One<Long> =
         One.single(endOffsetOfResult(partition))
 
-    override fun poll(timeout: Duration): One<List<Received>> = One.defer {
+    override fun poll(timeout: Duration): One<List<Received<ByteArray>>> = One.defer {
         if (pollErrorRemaining > 0) {
             pollErrorRemaining--
             throw pollError
         } else {
             val entry = pollQueue.poll()
-            entry ?: emptyList()
+            entry ?: emptyList<Received<ByteArray>>()
         }
     }
 

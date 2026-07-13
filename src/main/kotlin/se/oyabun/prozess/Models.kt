@@ -17,9 +17,11 @@ fun Positions.asOffsets(): Offsets = associate { it.partition to it.offset }
 typealias Offsets = Map<Partition, Long>
 typealias Headers = List<Header>
 
-sealed interface ReceivedKey {
-    data class Value(val key: String) : ReceivedKey
-    data object None : ReceivedKey
+sealed interface Key<out K> {
+    /** The record arrived without a key. */
+    data object Missing : Key<Nothing>
+    /** The record arrived with a key that was successfully deserialized to [value]. */
+    data class Present<out K>(val value: K) : Key<K>
 }
 
 data class Header(
@@ -46,8 +48,8 @@ sealed interface ReceivedMessage {
     data object Tombstone : ReceivedMessage
 }
 
-data class Received(
-    val key: ReceivedKey,
+data class Received<out K>(
+    val key: Key<K>,
     val message: ReceivedMessage,
     val position: Position,
     val headers: Headers = emptyList(),

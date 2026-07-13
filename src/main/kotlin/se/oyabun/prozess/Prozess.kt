@@ -10,9 +10,20 @@ import se.oyabun.aelv.toList
 import kotlin.time.Duration
 
 object Prozess {
-    typealias KeyExtraction<M> = (M) -> String
-    typealias Serializer<M> = (M) -> ByteArray
-    typealias HeadersProvider<M> = (M) -> Headers
+    /** Sentinel for [PartitionExtractor] — instructs Kafka to assign a partition via the default partitioner. */
+    const val NO_PARTITION: Int = -1
+
+    /** Sentinel for [TimestampExtractor] — instructs Kafka to use the broker ingestion time. */
+    const val NO_TIMESTAMP: Long = -1L
+
+    typealias KeyDeserializer<K>     = (ByteArray) -> K
+    typealias KeyExtraction<M, K>    = (M) -> K
+    typealias KeySerializer<K>       = (K) -> ByteArray
+    typealias Serializer<M>          = (M) -> ByteArray
+    typealias HeaderEnricher<M>      = (M) -> Headers
+    typealias PartitionExtractor<M>  = (M) -> Int
+    typealias TimestampExtractor<M>  = (M) -> Long
+    typealias Deserializer<M>        = (Received<ByteArray>) -> DeserializationResult<M>
 
     sealed interface DeserializationResult<out M> {
         data class Message<M>(val value: M) : DeserializationResult<M>
@@ -20,45 +31,51 @@ object Prozess {
         data class PoisonPill(val reason: String? = null) : DeserializationResult<Nothing>
     }
 
-    typealias Deserializer<M> = (Received) -> DeserializationResult<M>
-
-    interface Producer<M> {
-        fun send(key: String, value: M, partition: Int? = null, timestamp: Long? = null, headers: Headers = emptyList()): Long
-
-        /**
-         * Sends all [messages] to Kafka and blocks until every message has been acknowledged.
-         *
-         * Messages are grouped by extracted key and sent in order within each key group,
-         * preserving per-key ordering guarantees. Returns the original messages as a list
-         * in the order they were delivered downstream (stable within each key group;
-         * interleaved across key groups).
-         *
-         * @param messages the messages to send.
-         * @param key function that extracts the Kafka record key from a message.
-         * @param headersProvider optional function that extracts Kafka headers from a message.
-         * @return the sent messages (pass-through).
-         * @throws SendFailure if any message fails to send.
-         */
-        fun sendAll(messages: Collection<M>, key: KeyExtraction<M>, headersProvider: HeadersProvider<M> = { emptyList() }): List<M>
-
-        /**
-         * Sends all [messages] to Kafka and blocks until every message has been acknowledged.
-         *
-         * Convenience vararg overload — delegates to [sendAll] with a [Collection].
-         *
-         * @see sendAll
-         */
-        fun sendAll(vararg messages: M, key: KeyExtraction<M>, headersProvider: HeadersProvider<M> = { emptyList() }): List<M> =
-            sendAll(messages.toList(), key, headersProvider)
+    sealed interface Producer<M> {
         fun initTransactions()
         fun beginTransaction()
         fun commitTransaction()
         fun abortTransaction()
         fun sendOffsetsToTransaction(offsets: Offsets, member: GroupMember)
         fun close()
+
+        /** A producer with a configured key extractor and serializer. Per-key ordering is guaranteed in [sendAll]. */
+        sealed interface Keyed<M> : Producer<M> {
+            /** Sends [value] to Kafka and blocks until acknowledged. Returns the written offset. */
+            fun send(value: M): Long
+
+            /**
+             * Sends all [messages] to Kafka and blocks until every message has been acknowledged.
+             * Messages are grouped by extracted key and sent in order within each key group.
+             * Headers, partition, and timestamp are derived from each message via the configured extractors.
+             * Returns the sent messages as a list (pass-through).
+             * @throws SendFailure if any message fails to send.
+             */
+            fun sendAll(messages: Collection<M>): List<M>
+
+            /** Convenience vararg overload — delegates to [sendAll]. */
+            fun sendAll(vararg messages: M): List<M> = sendAll(messages.toList())
+        }
+
+        /** A producer with no key — records are sent with a null key and Kafka assigns partitions via round-robin. */
+        sealed interface Unkeyed<M> : Producer<M> {
+            /** Sends [value] to Kafka and blocks until acknowledged. Returns the written offset. */
+            fun send(value: M): Long
+
+            /**
+             * Sends all [messages] to Kafka and blocks until every message has been acknowledged.
+             * Headers, partition, and timestamp are derived from each message via the configured extractors.
+             * Returns the sent messages as a list (pass-through).
+             * @throws SendFailure if any message fails to send.
+             */
+            fun sendAll(messages: Collection<M>): List<M>
+
+            /** Convenience vararg overload — delegates to [sendAll]. */
+            fun sendAll(vararg messages: M): List<M> = sendAll(messages.toList())
+        }
     }
 
-    interface Consumer<M : Any> {
+    interface Consumer<K, M : Any> {
         fun start(from: StartOffset = StartOffset.Latest, until: EndOffset = EndOffset.Continuous)
         fun shutdown()
         val isDisposed: Boolean
@@ -72,63 +89,169 @@ object Prozess {
             onEvent { if (type.isInstance(it)) @Suppress("UNCHECKED_CAST") callback(it as T) }
     }
 
-    private fun <M : Any> simpleDeserializer(deserializeBytes: (ByteArray) -> M): Deserializer<M> = { received ->
+    private fun <M : Any> simpleDeserializer(messageDeserializer: (ByteArray) -> M): Deserializer<M> = { received ->
         when (val message = received.message) {
             is ReceivedMessage.Tombstone -> DeserializationResult.Tombstone
-            is ReceivedMessage.Data -> DeserializationResult.Message(deserializeBytes(message.bytes))
+            is ReceivedMessage.Data      -> DeserializationResult.Message(messageDeserializer(message.bytes))
         }
     }
 
+    private fun <K> keyMapperFor(keyDeserializer: KeyDeserializer<K>): (Key<ByteArray>) -> Key<K> = { k ->
+        when (k) {
+            is Key.Present -> Key.Present(keyDeserializer(k.value))
+            is Key.Missing -> Key.Missing
+        }
+    }
+
+    /** Convenience factory — deserializes values with [messageDeserializer], keys remain raw [ByteArray]. */
     fun <M : Any> consumer(
         config: ConsumerConfig,
-        deserializeBytes: (ByteArray) -> M,
-        process: (Received, M) -> Unit,
-        instance: String? = "consumer",
-    ): Consumer<M> = ConsumerBuilder(config, simpleDeserializer(deserializeBytes), instance)
-        .each { p -> process(p.received, p.value) }
+        messageDeserializer: (ByteArray) -> M,
+        process: (Headers, Key<ByteArray>, M) -> Unit,
+        instance: String = shortId(),
+    ): Consumer<ByteArray, M> = ConsumerBuilder<ByteArray, M>(config, { it }, simpleDeserializer(messageDeserializer), instance)
+        .each { p -> process(p.headers, p.key, p.value) }
 
+    /** Convenience factory — deserializes keys with [keyDeserializer] and values with [messageDeserializer]. */
+    fun <K : Any, M : Any> consumer(
+        config: ConsumerConfig,
+        keyDeserializer: KeyDeserializer<K>,
+        messageDeserializer: (ByteArray) -> M,
+        process: (Headers, Key<K>, M) -> Unit,
+        instance: String = shortId(),
+    ): Consumer<K, M> = ConsumerBuilder(config, keyMapperFor(keyDeserializer), simpleDeserializer(messageDeserializer), instance)
+        .each { p -> process(p.headers, p.key, p.value) }
+
+    /** Builder factory — deserializes values with [deserializer], keys remain raw [ByteArray]. */
     fun <M : Any> consumer(
         config: ConsumerConfig,
         deserializer: Deserializer<M>,
-    ): ConsumerBuilder<M> = ConsumerBuilder(config, deserializer)
+        instance: String = shortId(),
+    ): ConsumerBuilder<ByteArray, M> = ConsumerBuilder(config, { it }, deserializer, instance)
 
-    private fun <M : Any> wrap(
+    /** Builder factory — deserializes both keys with [keyDeserializer] and values with [deserializer]. */
+    fun <K : Any, M : Any> consumer(
         config: ConsumerConfig,
-        processor: Processor<M>,
-        instance: String?,
-    ): Consumer<M> = object : Consumer<M> {
-        private val delegate = StreamingConsumer(config, processor, instance)
-        override fun start(from: StartOffset, until: EndOffset) = delegate.start(from, until)
-        override fun shutdown() = delegate.shutdown()
-        override val isDisposed: Boolean get() = delegate.isDisposed
-        override fun pause() = delegate.pause()
-        override fun resume() = delegate.resume()
-        override fun hasNoAssignments(): Boolean = delegate.hasNoAssignments()
-        override fun position(partition: Partition): Long = delegate.position(partition)
-        override fun lag(partition: Partition): Long = delegate.lag(partition)
-        override fun onEvent(callback: (ConsumerEvent) -> Unit) = delegate.onEvent(callback)
+        keyDeserializer: KeyDeserializer<K>,
+        deserializer: Deserializer<M>,
+        instance: String = shortId(),
+    ): ConsumerBuilder<K, M> = ConsumerBuilder(config, keyMapperFor(keyDeserializer), deserializer, instance)
+
+    private fun <K, M : Any> wrap(config: ConsumerConfig, processor: Processor<M>, instance: String): Consumer<K, M> =
+        object : Consumer<K, M> {
+            private val delegate = StreamingConsumer(config, processor, instance)
+            override fun start(from: StartOffset, until: EndOffset) = delegate.start(from, until)
+            override fun shutdown()                                  = delegate.shutdown()
+            override val isDisposed: Boolean                         get() = delegate.isDisposed
+            override fun pause()                                     = delegate.pause()
+            override fun resume()                                    = delegate.resume()
+            override fun hasNoAssignments(): Boolean                 = delegate.hasNoAssignments()
+            override fun position(partition: Partition): Long        = delegate.position(partition)
+            override fun lag(partition: Partition): Long             = delegate.lag(partition)
+            override fun onEvent(callback: (ConsumerEvent) -> Unit)  = delegate.onEvent(callback)
+        }
+
+    private fun <T> Any.valueOrThrow(instance: String): T {
+        @Suppress("UNCHECKED_CAST")
+        return when (this) {
+            is Success<*> -> value as T
+            is Failure<*> -> throw SendFailure("$instance send failed", RuntimeException((value as? Throwable)?.message))
+            else          -> throw IllegalStateException("Unexpected result type: $this")
+        }
+    }
+
+    class ConsumerBuilder<K, M : Any>(
+        private val config: ConsumerConfig,
+        private val keyMapper: (Key<ByteArray>) -> Key<K>,
+        private val deserializer: Deserializer<M>,
+        private val instance: String = shortId(),
+    ) {
+        fun each(
+            maxConcurrency: Int = 1,
+            handler: (Processable<K, M>) -> Unit,
+        ): Consumer<K, M> = wrapProcessor(
+            DefaultProcessor.each(keyMapper, deserializer, handler, maxConcurrency = maxConcurrency)
+        )
+
+        fun batch(
+            size: Int = config.maxPollRecords,
+            duration: Duration = Duration.INFINITE,
+            maxConcurrency: Int = 1,
+            handler: (List<Processable<K, M>>) -> Unit,
+        ): Consumer<K, M> = wrapProcessor(
+            DefaultProcessor.batch(keyMapper, deserializer, handler, size, duration, maxConcurrency = maxConcurrency)
+        )
+
+        fun <GK : Any> groupBy(extractor: (Processable<K, M>) -> GK): GroupedConsumerBuilder<GK, K, M> =
+            GroupedConsumerBuilder(config, keyMapper, deserializer, extractor, instance)
+
+        fun processor(custom: Processor<M>): Consumer<K, M> = wrapProcessor(custom)
+
+        private fun wrapProcessor(processor: Processor<M>): Consumer<K, M> =
+            wrap(config, processor, instance)
+    }
+
+    class GroupedConsumerBuilder<GK : Any, K, M : Any>(
+        private val config: ConsumerConfig,
+        private val keyMapper: (Key<ByteArray>) -> Key<K>,
+        private val deserializer: Deserializer<M>,
+        private val keyExtractor: (Processable<K, M>) -> GK,
+        private val instance: String = shortId(),
+    ) {
+        fun each(
+            concurrency: Int = 1,
+            handler: (GK, Processable<K, M>) -> Unit,
+        ): Consumer<K, M> = wrapProcessor(
+            DefaultProcessor.groupedEach(keyMapper, deserializer, keyExtractor, handler, concurrency = concurrency)
+        )
+
+        fun batch(
+            size: Int = config.maxPollRecords,
+            duration: Duration = Duration.INFINITE,
+            concurrency: Int = 1,
+            handler: (GK, List<Processable<K, M>>) -> Unit,
+        ): Consumer<K, M> = wrapProcessor(
+            DefaultProcessor.groupedBatch(keyMapper, deserializer, keyExtractor, handler, size, duration, concurrency = concurrency)
+        )
+
+        private fun wrapProcessor(processor: Processor<M>): Consumer<K, M> =
+            wrap(config, processor, instance)
     }
 
     fun <M : Any> producer(
         config: ProducerConfig,
         serializer: Serializer<M>,
-        instance: String? = "producer",
-    ): Producer<M> = object : Producer<M> {
-        val delegate = StreamingProducer(config, instance, serializer)
-        override fun send(key: String, value: M, partition: Int?, timestamp: Long?, headers: Headers): Long {
-            val result = runBlocking { delegate.send(key, value, partition, timestamp, headers).await() }
-            return when (result) {
-                is Success -> result.value
-                is Failure -> throw SendFailure("$instance send failed", RuntimeException(result.value.message))
-            }
-        }
-        override fun sendAll(messages: Collection<M>, key: KeyExtraction<M>, headersProvider: HeadersProvider<M>): List<M> {
-            val result = runBlocking { delegate.sendAll(Many.from(messages), key, headersProvider).toList().await() }
-            return when (result) {
-                is Success -> result.value
-                is Failure -> throw SendFailure("$instance sendAll failed", RuntimeException(result.value.message))
-            }
-        }
+        headerEnricher: HeaderEnricher<M> = { emptyList() },
+        partitionExtractor: PartitionExtractor<M> = { NO_PARTITION },
+        timestampExtractor: TimestampExtractor<M> = { NO_TIMESTAMP },
+        instance: String = shortId(),
+    ): Producer.Unkeyed<M> = UnkeyedProducerImpl(
+        StreamingProducer(config, instance, null, null, headerEnricher, partitionExtractor, timestampExtractor, serializer),
+        instance,
+    )
+
+    fun <K : Any, M : Any> producer(
+        config: ProducerConfig,
+        keyExtractor: KeyExtraction<M, K>,
+        keySerializer: KeySerializer<K>,
+        serializer: Serializer<M>,
+        headerEnricher: HeaderEnricher<M> = { emptyList() },
+        partitionExtractor: PartitionExtractor<M> = { NO_PARTITION },
+        timestampExtractor: TimestampExtractor<M> = { NO_TIMESTAMP },
+        instance: String = shortId(),
+    ): Producer.Keyed<M> = KeyedProducerImpl(
+        StreamingProducer(config, instance, keyExtractor, { m -> keySerializer(keyExtractor(m)) }, headerEnricher, partitionExtractor, timestampExtractor, serializer),
+        instance,
+    )
+
+    private class UnkeyedProducerImpl<M : Any>(
+        private val delegate: StreamingProducer<M>,
+        private val instance: String,
+    ) : Producer.Unkeyed<M> {
+        override fun send(value: M): Long =
+            runBlocking { delegate.send(value).await() }.valueOrThrow(instance)
+        override fun sendAll(messages: Collection<M>): List<M> =
+            runBlocking { delegate.sendAll(Many.from(messages)).toList().await() }.valueOrThrow(instance)
         override fun sendOffsetsToTransaction(offsets: Offsets, member: GroupMember) { runBlocking { delegate.sendOffsetsToTransaction(offsets, member).await() } }
         override fun initTransactions()  { runBlocking { delegate.initTransactions().await() } }
         override fun beginTransaction()  { runBlocking { delegate.beginTransaction().await() } }
@@ -137,92 +260,22 @@ object Prozess {
         override fun close()             { runBlocking { delegate.close().await() } }
     }
 
-    class ConsumerBuilder<M : Any>(
-        private val config: ConsumerConfig,
-        private val deserializer: Deserializer<M>,
-        private val instance: String? = "consumer",
-    ) {
-        fun each(
-            maxConcurrency: Int = 1,
-            handler: (Processable<M>) -> Unit,
-        ): Consumer<M> = wrapProcessor(
-            DefaultProcessor.each(
-                deserializer = deserializer,
-                handler = handler,
-                maxConcurrency = maxConcurrency,
-            )
-        )
-
-        /** Fetches messages into atomic batches of [size] or [duration] timeout, then processes each batch. */
-        fun batch(
-            size: Int = config.maxPollRecords,
-            duration: Duration = Duration.INFINITE,
-            maxConcurrency: Int = 1,
-            handler: (List<Processable<M>>) -> Unit,
-        ): Consumer<M> = wrapProcessor(
-            DefaultProcessor.batch(
-                deserializer = deserializer,
-                handler = handler,
-                batchSize = size,
-                batchDuration = duration,
-                maxConcurrency = maxConcurrency,
-            )
-        )
-
-        /** Groups messages by an extracted key, enabling per-key ordered processing. */
-        fun <TKey : Any> groupBy(extractor: (Processable<M>) -> TKey): GroupedConsumerBuilder<TKey, M> =
-            GroupedConsumerBuilder(config, deserializer, extractor, instance)
-
-        /** Uses a custom [Processor] implementation instead of the built-in strategies. */
-        fun processor(custom: Processor<M>): Consumer<M> = wrapProcessor(custom)
-
-        private fun wrapProcessor(processor: Processor<M>): Consumer<M> =
-            wrap(config, processor, instance)
-    }
-
-    class GroupedConsumerBuilder<K : Any, M : Any>(
-        private val config: ConsumerConfig,
-        private val deserializer: Deserializer<M>,
-        private val keyExtractor: (Processable<M>) -> K,
-        private val instance: String? = "consumer",
-    ) {
-        /** Processes each message individually, grouped by key. Per-key ordering is preserved. */
-        fun each(
-            concurrency: Int = 1,
-            handler: (K, Processable<M>) -> Unit,
-        ): Consumer<M> = wrapProcessor(
-            DefaultProcessor.groupedEach(
-                deserializer = deserializer,
-                keyExtractor = keyExtractor,
-                handler = handler,
-                concurrency = concurrency,
-            )
-        )
-
-        /**
-         * Buffers messages into atomic batches per key group of [size] or [duration] timeout,
-         * then processes each batch as a unit. Per-key ordering is preserved.
-         */
-        fun batch(
-            size: Int = config.maxPollRecords,
-            duration: Duration = Duration.INFINITE,
-            concurrency: Int = 1,
-            handler: (K, List<Processable<M>>) -> Unit,
-        ): Consumer<M> = wrapProcessor(
-            DefaultProcessor.groupedBatch(
-                deserializer = deserializer,
-                keyExtractor = keyExtractor,
-                handler = handler,
-                batchSize = size,
-                batchDuration = duration,
-                concurrency = concurrency,
-            )
-        )
-
-        private fun wrapProcessor(processor: Processor<M>): Consumer<M> =
-            wrap(config, processor, instance)
+    private class KeyedProducerImpl<M : Any>(
+        private val delegate: StreamingProducer<M>,
+        private val instance: String,
+    ) : Producer.Keyed<M> {
+        override fun send(value: M): Long =
+            runBlocking { delegate.send(value).await() }.valueOrThrow(instance)
+        override fun sendAll(messages: Collection<M>): List<M> =
+            runBlocking { delegate.sendAll(Many.from(messages)).toList().await() }.valueOrThrow(instance)
+        override fun sendOffsetsToTransaction(offsets: Offsets, member: GroupMember) { runBlocking { delegate.sendOffsetsToTransaction(offsets, member).await() } }
+        override fun initTransactions()  { runBlocking { delegate.initTransactions().await() } }
+        override fun beginTransaction()  { runBlocking { delegate.beginTransaction().await() } }
+        override fun commitTransaction() { runBlocking { delegate.commitTransaction().await() } }
+        override fun abortTransaction()  { runBlocking { delegate.abortTransaction().await() } }
+        override fun close()             { runBlocking { delegate.close().await() } }
     }
 }
 
-inline fun <reified T : ConsumerEvent> Prozess.Consumer<*>.onEvent(noinline callback: (T) -> Unit) =
+inline fun <reified T : ConsumerEvent> Prozess.Consumer<*, *>.onEvent(noinline callback: (T) -> Unit) =
     onEvent { if (it is T) callback(it) }

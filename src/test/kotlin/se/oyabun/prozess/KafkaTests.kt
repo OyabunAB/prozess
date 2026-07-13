@@ -54,7 +54,7 @@ class KafkaTests {
             val received = mutableListOf<String>()
             val latch = CountDownLatch(count)
             val config = ConsumerConfig(bootstrapServers, groupId, setOf(topic))
-            val consumer = stringConsumer(config) { _, message ->
+            val consumer = stringConsumer(config) { _, _, message ->
                 received.add(message)
                 latch.countDown()
             }
@@ -73,7 +73,7 @@ class KafkaTests {
             val received = ConcurrentLinkedQueue<String>()
             val latch = CountDownLatch(count)
             val config = ConsumerConfig(bootstrapServers, groupId, setOf(topicName))
-            val consumer = stringConsumer(config) { _, message ->
+            val consumer = stringConsumer(config) { _, _, message ->
                 received.add(message)
                 latch.countDown()
             }
@@ -137,7 +137,7 @@ class KafkaTests {
 
             val first = ConcurrentLinkedQueue<String>()
             val firstLatch = CountDownLatch(count)
-            val firstConsumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, m ->
+            val firstConsumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, _, m ->
                 first.add(m)
                 firstLatch.countDown()
             }
@@ -148,7 +148,7 @@ class KafkaTests {
 
             val second = ConcurrentLinkedQueue<String>()
             val secondLatch = CountDownLatch(1)
-            val secondConsumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, m ->
+            val secondConsumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, _, m ->
                 second.add(m)
                 secondLatch.countDown()
             }
@@ -186,7 +186,7 @@ class KafkaTests {
             )
             producer.initTransactions()
             producer.beginTransaction()
-            producer.send("k", payload)
+            producer.send(payload)
             producer.commitTransaction()
             producer.close()
 
@@ -198,7 +198,7 @@ class KafkaTests {
                 topics = setOf(topicName),
                 isolationLevel = ConsumerConfig.IsolationLevel.ReadCommitted,
             )
-            val consumer = stringConsumer(config) { _, msg ->
+            val consumer = stringConsumer(config) { _, _, msg ->
                 received.add(msg)
                 latch.countDown()
             }
@@ -228,12 +228,12 @@ class KafkaTests {
 
             // Send and commit
             producer.beginTransaction()
-            producer.send("k", committedPayload)
+            producer.send(committedPayload)
             producer.commitTransaction()
 
             // Send and abort
             producer.beginTransaction()
-            producer.send("k", abortedPayload)
+            producer.send(abortedPayload)
             producer.abortTransaction()
             producer.close()
 
@@ -245,7 +245,7 @@ class KafkaTests {
                 topics = setOf(topicName),
                 isolationLevel = ConsumerConfig.IsolationLevel.ReadCommitted,
             )
-            val consumer = stringConsumer(config) { _, msg ->
+            val consumer = stringConsumer(config) { _, _, msg ->
                 received.add(msg)
                 latch.countDown()
             }
@@ -263,18 +263,18 @@ class KafkaTests {
             val payload = "hello-headers"
 
             val producer = Prozess.producer<String>(
-                ProducerConfig(bootstrapServers, Topic(topicName)),
-                { it.toByteArray() },
+                config = ProducerConfig(bootstrapServers, Topic(topicName)),
+                serializer = { it.toByteArray() },
+                headerEnricher = { listOf(Header("trace-id", "abc123".toByteArray()), Header("content-type", "json".toByteArray())) },
             )
-            val testHeaders = listOf(Header("trace-id", "abc123".toByteArray()), Header("content-type", "json".toByteArray()))
-            producer.send("k", payload, headers = testHeaders)
+            producer.send(payload)
             producer.close()
 
             val receivedHeaders = mutableListOf<Headers>()
             val latch = CountDownLatch(1)
             val config = ConsumerConfig(bootstrapServers, groupId, setOf(topicName))
-            val consumer = stringConsumer(config) { received, _ ->
-                receivedHeaders.add(received.headers)
+            val consumer = stringConsumer(config) { headers, _, _ ->
+                receivedHeaders.add(headers)
                 latch.countDown()
             }
             consumer.start(from = StartOffset.Earliest)
@@ -296,18 +296,20 @@ class KafkaTests {
             val groupId = groupId()
             val messages = (1..5).map { "batch-$it" }
 
-            val producer = Prozess.producer<String>(
-                ProducerConfig(bootstrapServers, Topic(topicName)),
-                { it.toByteArray() },
+            val producer = Prozess.producer<String, String>(
+                config = ProducerConfig(bootstrapServers, Topic(topicName)),
+                keyExtractor = { it },
+                keySerializer = { it.toByteArray() },
+                serializer = { it.toByteArray() },
             )
-            val returned = producer.sendAll(messages, key = { it })
+            val returned = producer.sendAll(messages)
             producer.close()
 
             assertEquals(messages.sorted(), returned.sorted())
 
             val received = mutableListOf<String>()
             val latch = CountDownLatch(messages.size)
-            val consumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, msg ->
+            val consumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, _, msg ->
                 received.add(msg)
                 latch.countDown()
             }
@@ -323,18 +325,20 @@ class KafkaTests {
             val topicName = topic(bootstrapServers)
             val groupId = groupId()
 
-            val producer = Prozess.producer<String>(
-                ProducerConfig(bootstrapServers, Topic(topicName)),
-                { it.toByteArray() },
+            val producer = Prozess.producer<String, String>(
+                config = ProducerConfig(bootstrapServers, Topic(topicName)),
+                keyExtractor = { it },
+                keySerializer = { it.toByteArray() },
+                serializer = { it.toByteArray() },
             )
-            val returned = producer.sendAll("alpha", "beta", "gamma", key = { it })
+            val returned = producer.sendAll("alpha", "beta", "gamma")
             producer.close()
 
             assertEquals(listOf("alpha", "beta", "gamma").sorted(), returned.sorted())
 
             val received = mutableListOf<String>()
             val latch = CountDownLatch(3)
-            val consumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, msg ->
+            val consumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, _, msg ->
                 received.add(msg)
                 latch.countDown()
             }
@@ -351,17 +355,20 @@ class KafkaTests {
             val groupId = groupId()
             val messages = listOf("x", "y")
 
-            val producer = Prozess.producer<String>(
-                ProducerConfig(bootstrapServers, Topic(topicName)),
-                { it.toByteArray() },
+            val producer = Prozess.producer<String, String>(
+                config = ProducerConfig(bootstrapServers, Topic(topicName)),
+                keyExtractor = { it },
+                keySerializer = { it.toByteArray() },
+                serializer = { it.toByteArray() },
+                headerEnricher = { listOf(Header("src", it.toByteArray())) },
             )
-            producer.sendAll(messages, key = { it }, headersProvider = { listOf(Header("src", it.toByteArray())) })
+            producer.sendAll(messages)
             producer.close()
 
             val receivedHeaders = mutableListOf<Pair<String, Headers>>()
             val latch = CountDownLatch(messages.size)
-            val consumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { received, msg ->
-                receivedHeaders.add(msg to received.headers)
+            val consumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { headers, _, msg ->
+                receivedHeaders.add(msg to headers)
                 latch.countDown()
             }
             consumer.start(from = StartOffset.Earliest)
@@ -389,7 +396,7 @@ class KafkaTests {
 
             // First consumer: consume and commit all messages from both partitions
             val firstLatch = CountDownLatch(count)
-            val firstConsumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, _ ->
+            val firstConsumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, _, _ ->
                 firstLatch.countDown()
             }
             firstConsumer.start(from = StartOffset.Earliest)
@@ -405,7 +412,7 @@ class KafkaTests {
             // Second consumer: Earliest should seek partition 2 to beginning, resume 0 and 1 from committed
             val received = ConcurrentLinkedQueue<String>()
             val secondLatch = CountDownLatch(5)
-            val secondConsumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, msg ->
+            val secondConsumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, _, msg ->
                 received.add(msg)
                 secondLatch.countDown()
             }
@@ -438,6 +445,7 @@ class KafkaTests {
             val consumer = StreamingConsumer(
                 config = config,
                 processor = DefaultProcessor.each(
+                    keyMapper = { Key.Missing },
                     deserializer = { r ->
                         when (val msg = r.message) {
                             is ReceivedMessage.Data -> Prozess.DeserializationResult.Message(String(msg.bytes))
@@ -464,7 +472,7 @@ class KafkaTests {
 
             val received = ConcurrentLinkedQueue<String>()
             val latch = CountDownLatch(5)
-            val consumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, msg ->
+            val consumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, _, msg ->
                 received.add(msg)
                 latch.countDown()
             }
@@ -506,7 +514,7 @@ class KafkaTests {
                 topics = setOf(topicName),
                 startOffset = StartOffset.AtTimestamp(kotlin.time.Instant.fromEpochMilliseconds(targetTimestamp)),
             )
-            val consumer = stringConsumer(config) { _, msg ->
+            val consumer = stringConsumer(config) { _, _, msg ->
                 received.add(msg)
                 latch.countDown()
             }
@@ -530,7 +538,7 @@ class KafkaTests {
             // Publish and consume all with consumer A
             val published = publish(bootstrapServers, topicName, count = count)
             val firstLatch = CountDownLatch(count)
-            val consumerA = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, _ ->
+            val consumerA = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, _, _ ->
                 firstLatch.countDown()
             }
             consumerA.start(from = StartOffset.Earliest)
@@ -541,7 +549,7 @@ class KafkaTests {
             val pastTimestamp = kotlin.time.Instant.fromEpochMilliseconds(System.currentTimeMillis() - 60_000)
             val received = ConcurrentLinkedQueue<String>()
             val replayLatch = CountDownLatch(1)
-            val consumerB = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, msg ->
+            val consumerB = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, _, msg ->
                 received.add(msg)
                 replayLatch.countDown()
             }
@@ -565,7 +573,7 @@ class KafkaTests {
 
             val received = ConcurrentLinkedQueue<String>()
             val latch = CountDownLatch(count)
-            val consumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, msg ->
+            val consumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, _, msg ->
                 received.add(msg)
                 latch.countDown()
             }
@@ -597,7 +605,7 @@ class KafkaTests {
 
             val received = ConcurrentLinkedQueue<String>()
             val latch = CountDownLatch(totalCount)
-            val consumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, msg ->
+            val consumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, _, msg ->
                 received.add(msg)
                 latch.countDown()
             }
@@ -623,7 +631,7 @@ class KafkaTests {
 
             val received = ConcurrentLinkedQueue<String>()
             val latch = CountDownLatch(lateMessages.size)
-            val consumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, msg ->
+            val consumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, _, msg ->
                 received.add(msg)
                 latch.countDown()
             }
@@ -684,7 +692,7 @@ class KafkaTests {
             // Restart in same group — should NOT replay filtered messages
             val replayed = ConcurrentLinkedQueue<String>()
             val replayLatch = CountDownLatch(1)
-            val consumer2 = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, msg ->
+            val consumer2 = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, _, msg ->
                 replayed.add(msg)
                 replayLatch.countDown()
             }
@@ -717,7 +725,7 @@ class KafkaTests {
                     sessionTimeout = 6.seconds,
                     heartbeatInterval = 2.seconds,
                 ),
-            ) { _, msg ->
+            ) { _, _, msg ->
                 receivedA.add(msg)
                 firstArrived.countDown()
             }
@@ -733,7 +741,7 @@ class KafkaTests {
             val allDone = CountDownLatch(count - committedCount)
             val consumerB = stringConsumer(
                 ConsumerConfig(bootstrapServers, groupId, setOf(topicName)),
-            ) { _, msg ->
+            ) { _, _, msg ->
                 receivedB.add(msg)
                 allDone.countDown()
             }
@@ -755,10 +763,10 @@ class KafkaTests {
 
     private fun stringConsumer(
         config: ConsumerConfig,
-        process: (Received, String) -> Unit = { _, _ -> },
+        process: (Headers, Key<ByteArray>, String) -> Unit = { _, _, _ -> },
     ) = Prozess.consumer(
         config = config,
-        deserializeBytes = { String(it) },
+        messageDeserializer = { String(it) },
         process = process,
     )
 }

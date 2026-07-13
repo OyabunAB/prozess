@@ -8,7 +8,6 @@ import org.apache.kafka.clients.consumer.KafkaConsumer
 import org.apache.kafka.clients.consumer.OffsetAndMetadata
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.serialization.ByteArrayDeserializer
-import org.apache.kafka.common.serialization.StringDeserializer
 import org.apache.kafka.common.errors.WakeupException
 import se.oyabun.aelv.None
 import se.oyabun.aelv.One
@@ -21,9 +20,9 @@ internal class ThreadsafeKafkaClient(config: ConsumerConfig) : KafkaClient {
 
     override val pollInterval: Duration = config.pollInterval
 
-    private val delegate = KafkaConsumer<String, ByteArray>(
+    private val delegate = KafkaConsumer<ByteArray?, ByteArray>(
         mapOf(
-            ApacheConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG   to StringDeserializer::class.java.name,
+            ApacheConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG   to ByteArrayDeserializer::class.java.name,
             ApacheConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG to ByteArrayDeserializer::class.java.name,
             ApacheConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG       to false,
         ) + config.toKafkaProperties(),
@@ -71,7 +70,7 @@ internal class ThreadsafeKafkaClient(config: ConsumerConfig) : KafkaClient {
                 ?: throw IllegalStateException("No end offset returned for $partition")
         }
 
-    override fun poll(timeout: Duration): One<List<Received>> = One.defer(dispatcher) {
+    override fun poll(timeout: Duration): One<List<Received<ByteArray>>> = One.defer(dispatcher) {
         try {
             delegate.poll(timeout.toJavaDuration()).map { it.toReceived() }
         } catch (_: WakeupException) {
@@ -119,8 +118,8 @@ internal class ThreadsafeKafkaClient(config: ConsumerConfig) : KafkaClient {
     private fun TopicPartition.toPartition()                           = Partition(partition(), Topic(topic()))
     private fun org.apache.kafka.common.PartitionInfo.toPartition()   = Partition(partition(), Topic(topic()))
     private fun Map.Entry<TopicPartition, Long>.toPosition()          = Position(Partition(key.partition(), Topic(key.topic())), value)
-    private fun ConsumerRecord<String, ByteArray>.toReceived() = Received(
-        key()?.let { ReceivedKey.Value(it) } ?: ReceivedKey.None,
+    private fun ConsumerRecord<ByteArray?, ByteArray>.toReceived() = Received(
+        key()?.let { Key.Present(it) } ?: Key.Missing,
         value()?.let { ReceivedMessage.Data(it) } ?: ReceivedMessage.Tombstone,
         Position(Partition(partition(), Topic(topic())), offset()),
         headers().iterator().asSequence().map { Header(it.key(), it.value()) }.toList(),

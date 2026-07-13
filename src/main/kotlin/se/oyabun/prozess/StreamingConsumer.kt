@@ -40,7 +40,7 @@ import kotlin.time.Duration.Companion.seconds
 class StreamingConsumer<M : Any>(
     val config: ConsumerConfig,
     private val processor: Processor<M>,
-    instance: String? = "consumer",
+    instance: String = shortId(),
     private val client: KafkaClient = ThreadsafeKafkaClient(config),
 ) {
     private val log        = Logging.logger { }
@@ -113,7 +113,7 @@ class StreamingConsumer<M : Any>(
         val sync     = syncSignal(until, complete)
         incomingFeed(sync, closeSignal.asMany(), from, until)
             .groupBy(
-                keySelector  = { received: Received -> received.position.partition },
+                keySelector  = { received: Received<ByteArray> -> received.position.partition },
                 groupHandler = { _, group ->
                     processor.process(group).concatMap { position ->
                         One.defer { committer.markProcessed(position) }.flatMapMany { Many.empty() }
@@ -154,11 +154,11 @@ class StreamingConsumer<M : Any>(
     private fun emitEvent(event: ConsumerEvent) = eventSink.tryEmit(event)
 
     private fun incomingFeed(
-        sync: Many<Received>,
+        sync: Many<Received<ByteArray>>,
         closeSignal: Many<Unit>,
         from: StartOffset,
         until: EndOffset,
-    ): Many<Received> = client.partitionsFor(config.topics)
+    ): Many<Received<ByteArray>> = client.partitionsFor(config.topics)
         .flatMapMany { topicPartitions ->
             val awaitSubscription = client.subscribe(
                 config.topics,
@@ -239,8 +239,8 @@ class StreamingConsumer<M : Any>(
         }
         .take(1)
 
-    private fun syncSignal(until: EndOffset, complete: Many<Position>): Many<Received> = when (until) {
-        is CatchUp              -> Many.empty<Received>().delaySubscription(complete)
+    private fun syncSignal(until: EndOffset, complete: Many<Position>): Many<Received<ByteArray>> = when (until) {
+        is CatchUp              -> Many.empty<Received<ByteArray>>().delaySubscription(complete)
         is EndOffset.Continuous -> Many.never()
     }
 
