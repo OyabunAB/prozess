@@ -206,6 +206,10 @@ Messages are grouped by extracted key and sent in order within each key group, p
 per-key ordering. The underlying `StreamingProducer.sendAll()` is available for reactive
 pipelines that already work with `Many<M>`.
 
+> **Failure behaviour:** if any message fails to send, `sendAll` throws `SendFailure` immediately.
+> Messages already acknowledged before the failure are not returned and cannot be identified from
+> the exception — treat the batch as all-or-nothing or handle partial delivery at the call site.
+
 ### Transactions
 
 ```kotlin

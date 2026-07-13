@@ -155,7 +155,7 @@ object Prozess {
         @Suppress("UNCHECKED_CAST")
         return when (this) {
             is Success<*> -> value as T
-            is Failure<*> -> throw SendFailure("$instance send failed", RuntimeException((value as? Throwable)?.message))
+            is Failure<*> -> throw SendFailure("$instance send failed", value as? Throwable ?: RuntimeException("unknown cause"))
             else          -> throw IllegalStateException("Unexpected result type: $this")
         }
     }
