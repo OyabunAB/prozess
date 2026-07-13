@@ -15,7 +15,8 @@ class ConsumerEventTest {
 
     private fun consumer(fake: FakeKafkaClient = FakeKafkaClient()): Pair<StreamingConsumer<String>, FakeKafkaClient> {
         fake.setPartitionsFor("test", setOf(p0, p1))
-        val processor = DefaultProcessor.each<String>(
+        val processor = DefaultProcessor.each<Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = { received ->
                 when (val msg = received.message) {
                     is ReceivedMessage.Data -> Prozess.DeserializationResult.Message(String(msg.bytes))
@@ -91,7 +92,8 @@ class ConsumerEventTest {
     fun `revoke emits Revoked event with partitions`() {
         val fake = FakeKafkaClient()
         fake.setPartitionsFor("test", setOf(p0, p1))
-        val processor = DefaultProcessor.each<String>(
+        val processor = DefaultProcessor.each<Nothing, String>(
+            keyMapper = { Key.Missing },
             deserializer = { received ->
                 when (val msg = received.message) {
                     is ReceivedMessage.Data -> Prozess.DeserializationResult.Message(String(msg.bytes))

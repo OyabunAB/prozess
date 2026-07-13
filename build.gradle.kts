@@ -26,8 +26,8 @@ repositories {
 dependencies {
     api(libs.kafka.clients)
     api(libs.aelv)
+    api(libs.slf4j.api)
     implementation(libs.coroutines.core)
-    implementation(libs.bundles.logging)
     testImplementation(libs.bundles.test)
 
     "jmhImplementation"(libs.bundles.jmh)

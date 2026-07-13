@@ -71,7 +71,7 @@ fun addPartitions(bootstrapServers: String, topic: String, totalPartitions: Int)
  * receives [ConsumerEvent.Assigned]. Call this BEFORE [Prozess.Consumer.start], then
  * call [Prozess.Consumer.start], then [awaitLatch] to block until all are assigned.
  */
-fun onAssigned(vararg consumers: Prozess.Consumer<*>): CountDownLatch {
+fun onAssigned(vararg consumers: Prozess.Consumer<*, *>): CountDownLatch {
     val latch = CountDownLatch(consumers.size)
     consumers.forEach { consumer ->
         val counted = AtomicBoolean(false)
@@ -89,7 +89,7 @@ fun onAssigned(vararg consumers: Prozess.Consumer<*>): CountDownLatch {
  * emits [ConsumerEvent.Stopped]. Call this BEFORE [Prozess.Consumer.start], then
  * call [awaitLatch] to block until the consumer has fully stopped.
  */
-fun onStopped(consumer: Prozess.Consumer<*>): CountDownLatch {
+fun onStopped(consumer: Prozess.Consumer<*, *>): CountDownLatch {
     val latch = CountDownLatch(1)
     val counted = AtomicBoolean(false)
     consumer.onEvent { event ->

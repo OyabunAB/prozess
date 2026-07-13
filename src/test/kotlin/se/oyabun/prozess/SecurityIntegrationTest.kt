@@ -173,8 +173,13 @@ class SecurityIntegrationTest {
             topic = Topic(topicName),
             security = security,
         )
-        val producer = StreamingProducer<String>(producerConfig) { it.toByteArray() }
-        runBlocking { producer.send("key", message).await() }
+        val producer = StreamingProducer<String>(
+            config = producerConfig,
+            keyExtractor = null,
+            keyBytes = null,
+            serializer = { it.toByteArray() },
+        )
+        runBlocking { producer.send(message).await() }
         runBlocking { producer.close().await() }
 
         // Consume
@@ -188,8 +193,8 @@ class SecurityIntegrationTest {
         )
         val consumer = Prozess.consumer(
             config = consumerConfig,
-            deserializeBytes = { String(it) },
-            process = { _, msg ->
+            messageDeserializer = { String(it) },
+            process = { _, _, msg ->
                 received.add(msg)
                 latch.countDown()
             },

@@ -21,9 +21,17 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.Duration.Companion.milliseconds
 
-data class Processable<M>(
-    val received: Received,
+/**
+ * A deserialized Kafka record ready for processing.
+ *
+ * @param K the Kafka key type; [Nothing] for [Prozess.Consumer.Unkeyed] consumers.
+ * @param M the deserialized value type.
+ */
+data class Processable<out K, M>(
+    val key: Key<K>,
     val value: M,
+    val position: Position,
+    val headers: Headers,
 )
 
 data class RetryConfig(
@@ -32,7 +40,7 @@ data class RetryConfig(
 )
 
 interface Processor<M : Any> {
-    fun process(partition: Many<Received>): Many<Position>
+    fun process(partition: Many<Received<ByteArray>>): Many<Position>
 }
 
 internal class ContiguousOffsetTracker {
@@ -51,40 +59,42 @@ internal class ContiguousOffsetTracker {
 }
 
 class DefaultProcessor<M : Any> private constructor(
-    private val pipeline: (Many<Received>) -> Many<Position>,
+    private val pipeline: (Many<Received<ByteArray>>) -> Many<Position>,
 ) : Processor<M> {
 
-    override fun process(partition: Many<Received>): Many<Position> = pipeline(partition)
+    override fun process(partition: Many<Received<ByteArray>>): Many<Position> = pipeline(partition)
 
     companion object {
 
         private fun retryPolicy(retryConfig: RetryConfig): Policy.Retry =
             Policy.retry().withBackoff(retryConfig.minBackoff, retryConfig.maxBackoff).on { true }
 
-        fun <M : Any> each(
+        fun <KafkaKey, M : Any> each(
+            keyMapper: (Key<ByteArray>) -> Key<KafkaKey> = { Key.Missing },
             deserializer: Deserializer<M>,
-            handler: (Processable<M>) -> Unit,
+            handler: (Processable<KafkaKey, M>) -> Unit,
             retryConfig: RetryConfig = RetryConfig(),
             maxConcurrency: Int = 1,
         ): DefaultProcessor<M> {
             val policy = retryPolicy(retryConfig)
             val log    = Logging.logger { }
-            fun processOne(received: Received): One<Position> = One.defer {
+            fun processOne(received: Received<ByteArray>): One<Position> = One.defer {
                 when (val result = deserializer(received)) {
-                    is DeserializationResult.Message    -> { handler(Processable(received, result.value)); received.position }
+                    is DeserializationResult.Message    -> { handler(Processable(keyMapper(received.key), result.value, received.position, received.headers)); received.position }
                     is DeserializationResult.Tombstone  -> { log.processing.tombstone(received.position); received.position }
                     is DeserializationResult.PoisonPill -> { log.processing.poisonPill(received.position, result.reason); received.position }
                 }
             }.retry(policy)
 
             return DefaultProcessor { partition ->
-                partition.flatMapSequential(maxConcurrency) { received: Received -> processOne(received).asMany() }
+                partition.flatMapSequential(maxConcurrency) { received -> processOne(received).asMany() }
             }
         }
 
-        fun <M : Any> batch(
+        fun <KafkaKey, M : Any> batch(
+            keyMapper: (Key<ByteArray>) -> Key<KafkaKey> = { Key.Missing },
             deserializer: Deserializer<M>,
-            handler: (List<Processable<M>>) -> Unit,
+            handler: (List<Processable<KafkaKey, M>>) -> Unit,
             batchSize: Int,
             batchDuration: Duration = Duration.INFINITE,
             retryConfig: RetryConfig = RetryConfig(),
@@ -93,85 +103,87 @@ class DefaultProcessor<M : Any> private constructor(
             val policy = retryPolicy(retryConfig)
             val log    = Logging.logger { }
 
-            fun processBatch(messages: List<Received>): Many<Position> =
+            fun processBatch(messages: List<Received<ByteArray>>): Many<Position> =
                 Many.from(messages)
-                    .flatMap { received: Received ->
+                    .flatMap { received ->
                         One.defer {
                             when (val result = deserializer(received)) {
-                                is DeserializationResult.Message    -> BatchItem<M>(Processable(received, result.value))
+                                is DeserializationResult.Message    -> BatchItem<KafkaKey, M>(Processable(keyMapper(received.key), result.value, received.position, received.headers))
                                 is DeserializationResult.Tombstone  -> { log.processing.tombstone(received.position); BatchItem(ack = received.position) }
                                 is DeserializationResult.PoisonPill -> { log.processing.poisonPill(received.position, result.reason); BatchItem(ack = received.position) }
                             }
                         }.retry(policy).asMany()
                     }
                     .toList()
-                    .flatMapMany { items: List<BatchItem<M>> ->
-                        val processables: List<Processable<M>> = items.mapNotNull { it.processable }
-                        val acks: List<Position>               = items.mapNotNull { it.ack }
+                    .flatMapMany { items: List<BatchItem<KafkaKey, M>> ->
+                        val processables = items.mapNotNull { it.processable }
+                        val acks         = items.mapNotNull { it.ack }
                         if (processables.isEmpty()) return@flatMapMany Many.from(acks)
                         One.defer {
                             handler(processables)
-                            processables.map { it.received.position } + acks
-                        }.retry(policy).flatMapMany { positions: List<Position> -> Many.from(positions.sortedBy { p -> p.offset }) }
+                            processables.map { it.position } + acks
+                        }.retry(policy).flatMapMany { positions -> Many.from(positions.sortedBy { it.offset }) }
                     }
 
             return DefaultProcessor { partition ->
                 partition.bufferTimeout(batchSize, batchDuration)
-                    .flatMapSequential(maxConcurrency) { messages: List<Received> -> processBatch(messages) }
+                    .flatMapSequential(maxConcurrency) { messages -> processBatch(messages) }
             }
         }
 
-        fun <K : Any, M : Any> groupedEach(
+        fun <GroupingKey : Any, KafkaKey, M : Any> groupedEach(
+            keyMapper: (Key<ByteArray>) -> Key<KafkaKey> = { Key.Missing },
             deserializer: Deserializer<M>,
-            keyExtractor: (Processable<M>) -> K,
-            handler: (K, Processable<M>) -> Unit,
+            keyExtractor: (Processable<KafkaKey, M>) -> GroupingKey,
+            handler: (GroupingKey, Processable<KafkaKey, M>) -> Unit,
             retryConfig: RetryConfig = RetryConfig(),
             concurrency: Int = 1,
         ): DefaultProcessor<M> {
             val policy = retryPolicy(retryConfig)
             val log    = Logging.logger { }
 
-            fun partitionPipeline(partition: Many<Received>): Many<Position> {
+            fun partitionPipeline(partition: Many<Received<ByteArray>>): Many<Position> {
                 val tracker = ContiguousOffsetTracker()
-                return deserialize(log, deserializer, partition, policy)
+                return deserialize(log, keyMapper, deserializer, partition, policy)
                     .groupBy(
-                        keySelector = { event: GroupedEvent<M> ->
+                        keySelector = { event: GroupedEvent<KafkaKey, M> ->
                             when (event) {
                                 is GroupedEvent.Message -> GroupKey.Defined(keyExtractor(event.processable))
                                 is GroupedEvent.Ignored -> GroupKey.Undefined
                             }
                         },
-                        groupHandler = { key: GroupKey<K>, group: Many<GroupedEvent<M>> ->
+                        groupHandler = { key: GroupKey<GroupingKey>, group: Many<GroupedEvent<KafkaKey, M>> ->
                             when (key) {
-                                is GroupKey.Undefined -> group.mapNotNull { event ->
+                                is GroupKey.Undefined   -> group.mapNotNull { event ->
                                     when (event) {
                                         is GroupedEvent.Ignored -> event.position
                                         is GroupedEvent.Message -> null
                                     }
                                 }
-                                is GroupKey.Defined -> group
+                                is GroupKey.Defined<GroupingKey> -> group
                                     .mapNotNull { event ->
                                         when (event) {
-                                            is GroupedEvent.Message<M> -> event.processable
-                                            is GroupedEvent.Ignored    -> null
+                                            is GroupedEvent.Message<*, *> -> @Suppress("UNCHECKED_CAST") (event as GroupedEvent.Message<KafkaKey, M>).processable
+                                            is GroupedEvent.Ignored       -> null
                                         }
                                     }
-                                    .concatMap { p: Processable<M> ->
-                                        One.defer { handler(key.key, p); p.received.position }.retry(policy).asMany()
+                                    .concatMap { p ->
+                                        One.defer { handler(key.key, p); p.position }.retry(policy).asMany()
                                     }
                             }
                         },
                     )
-                    .mapNotNull { position: Position -> tracker.onCompleted(position) }
+                    .mapNotNull { position -> tracker.onCompleted(position) }
             }
 
             return DefaultProcessor { partition -> partitionPipeline(partition) }
         }
 
-        fun <K : Any, M : Any> groupedBatch(
+        fun <GroupingKey : Any, KafkaKey, M : Any> groupedBatch(
+            keyMapper: (Key<ByteArray>) -> Key<KafkaKey> = { Key.Missing },
             deserializer: Deserializer<M>,
-            keyExtractor: (Processable<M>) -> K,
-            handler: (K, List<Processable<M>>) -> Unit,
+            keyExtractor: (Processable<KafkaKey, M>) -> GroupingKey,
+            handler: (GroupingKey, List<Processable<KafkaKey, M>>) -> Unit,
             batchSize: Int,
             batchDuration: Duration = Duration.INFINITE,
             retryConfig: RetryConfig = RetryConfig(),
@@ -180,57 +192,58 @@ class DefaultProcessor<M : Any> private constructor(
             val policy = retryPolicy(retryConfig)
             val log    = Logging.logger { }
 
-            fun partitionPipeline(partition: Many<Received>): Many<Position> {
+            fun partitionPipeline(partition: Many<Received<ByteArray>>): Many<Position> {
                 val tracker = ContiguousOffsetTracker()
-                return deserialize(log, deserializer, partition, policy)
+                return deserialize(log, keyMapper, deserializer, partition, policy)
                     .groupBy(
-                        keySelector = { event: GroupedEvent<M> ->
+                        keySelector = { event: GroupedEvent<KafkaKey, M> ->
                             when (event) {
                                 is GroupedEvent.Message -> GroupKey.Defined(keyExtractor(event.processable))
                                 is GroupedEvent.Ignored -> GroupKey.Undefined
                             }
                         },
-                        groupHandler = { key: GroupKey<K>, group: Many<GroupedEvent<M>> ->
+                        groupHandler = { key: GroupKey<GroupingKey>, group: Many<GroupedEvent<KafkaKey, M>> ->
                             when (key) {
-                                is GroupKey.Undefined -> group.mapNotNull { event ->
+                                is GroupKey.Undefined   -> group.mapNotNull { event ->
                                     when (event) {
                                         is GroupedEvent.Ignored -> event.position
                                         is GroupedEvent.Message -> null
                                     }
                                 }
-                                is GroupKey.Defined -> group
+                                is GroupKey.Defined<GroupingKey> -> group
                                     .mapNotNull { event ->
                                         when (event) {
-                                            is GroupedEvent.Message<M> -> event.processable
-                                            is GroupedEvent.Ignored    -> null
+                                            is GroupedEvent.Message<*, *> -> @Suppress("UNCHECKED_CAST") (event as GroupedEvent.Message<KafkaKey, M>).processable
+                                            is GroupedEvent.Ignored       -> null
                                         }
                                     }
                                     .bufferTimeout(batchSize, batchDuration)
                                     .filter { it.isNotEmpty() }
-                                    .concatMap { batch: List<Processable<M>> ->
+                                    .concatMap { batch ->
                                         One.defer {
                                             handler(key.key, batch)
-                                            batch.map { p -> p.received.position }
-                                        }.retry(policy).flatMapMany { positions: List<Position> -> Many.from(positions) }
+                                            batch.map { it.position }
+                                        }.retry(policy).flatMapMany { positions -> Many.from(positions) }
                                     }
                             }
                         },
                     )
-                    .mapNotNull { position: Position -> tracker.onCompleted(position) }
+                    .mapNotNull { position -> tracker.onCompleted(position) }
             }
 
             return DefaultProcessor { partition -> partitionPipeline(partition) }
         }
 
-        private fun <M> deserialize(
+        private fun <KafkaKey, M> deserialize(
             log: Logger,
+            keyMapper: (Key<ByteArray>) -> Key<KafkaKey>,
             deserializer: Deserializer<M>,
-            partition: Many<Received>,
+            partition: Many<Received<ByteArray>>,
             policy: Policy.Retry,
-        ): Many<GroupedEvent<M>> = partition.flatMap { received: Received ->
+        ): Many<GroupedEvent<KafkaKey, M>> = partition.flatMap { received ->
             One.defer {
                 when (val result = deserializer(received)) {
-                    is DeserializationResult.Message    -> GroupedEvent.Message(Processable(received, result.value))
+                    is DeserializationResult.Message    -> GroupedEvent.Message(Processable(keyMapper(received.key), result.value, received.position, received.headers))
                     is DeserializationResult.Tombstone  -> { log.processing.tombstone(received.position); GroupedEvent.Ignored(received.position) }
                     is DeserializationResult.PoisonPill -> { log.processing.poisonPill(received.position, result.reason); GroupedEvent.Ignored(received.position) }
                 }
@@ -239,17 +252,17 @@ class DefaultProcessor<M : Any> private constructor(
     }
 }
 
-private data class BatchItem<M>(
-    val processable: Processable<M>? = null,
+private data class BatchItem<KafkaKey, M>(
+    val processable: Processable<KafkaKey, M>? = null,
     val ack: Position? = null,
 )
 
-private sealed class GroupedEvent<out M> {
-    class Message<M>(val processable: Processable<M>) : GroupedEvent<M>()
-    class Ignored(val position: Position) : GroupedEvent<Nothing>()
+private sealed class GroupedEvent<out KafkaKey, out M> {
+    class Message<KafkaKey, M>(val processable: Processable<KafkaKey, M>) : GroupedEvent<KafkaKey, M>()
+    class Ignored(val position: Position) : GroupedEvent<Nothing, Nothing>()
 }
 
-private sealed class GroupKey<out K> {
-    data class Defined<K>(val key: K) : GroupKey<K>()
+private sealed class GroupKey<out GroupingKey> {
+    data class Defined<GroupingKey>(val key: GroupingKey) : GroupKey<GroupingKey>()
     data object Undefined : GroupKey<Nothing>()
 }

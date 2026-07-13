@@ -46,14 +46,14 @@ class RebalanceKafkaTests {
 
             val consumerA = stringConsumer(
                 ConsumerConfig(bootstrapServers, groupId, setOf(topicName))
-            ) { _, msg ->
+            ) { _, _, msg ->
                 messagesA.add(msg)
                 allDone.countDown()
             }
 
             val consumerB = stringConsumer(
                 ConsumerConfig(bootstrapServers, groupId, setOf(topicName))
-            ) { _, msg ->
+            ) { _, _, msg ->
                 messagesB.add(msg)
                 allDone.countDown()
             }
@@ -93,7 +93,7 @@ class RebalanceKafkaTests {
 
             val consumerA = stringConsumer(
                 ConsumerConfig(bootstrapServers, groupId, setOf(topicName)),
-            ) { _, _ ->
+            ) { _, _, _ ->
                 firstDone.countDown()
                 allDone.countDown()
             }
@@ -105,7 +105,7 @@ class RebalanceKafkaTests {
 
             val consumerB = stringConsumer(
                 ConsumerConfig(bootstrapServers, groupId, setOf(topicName)),
-            ) { _, msg ->
+            ) { _, _, msg ->
                 messagesB.add(msg)
                 allDone.countDown()
             }
@@ -142,14 +142,14 @@ class RebalanceKafkaTests {
 
             val consumerA = stringConsumer(
                 ConsumerConfig(bootstrapServers, groupId, setOf(topicName)),
-            ) { _, msg ->
+            ) { _, _, msg ->
                 messagesA.add(msg)
                 allDone.countDown()
             }
 
             val consumerB = stringConsumer(
                 ConsumerConfig(bootstrapServers, groupId, setOf(topicName)),
-            ) { _, msg ->
+            ) { _, _, msg ->
                 messagesB.add(msg)
                 allDone.countDown()
             }
@@ -183,10 +183,10 @@ class RebalanceKafkaTests {
 
     private fun stringConsumer(
         config: ConsumerConfig,
-        process: (Received, String) -> Unit = { _, _ -> },
+        process: (Headers, Key<ByteArray>, String) -> Unit = { _, _, _ -> },
     ) = Prozess.consumer(
         config = config,
-        deserializeBytes = { String(it) },
+        messageDeserializer = { String(it) },
         process = process,
     )
 }

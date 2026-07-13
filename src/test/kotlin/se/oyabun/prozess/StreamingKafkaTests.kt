@@ -34,9 +34,14 @@ class StreamingKafkaTests {
         fun `sendAll passes through original elements`() {
             val topic = topic(bootstrapServers)
             val config = ProducerConfig(bootstrapServers, Topic(topic))
-            val producer = StreamingProducer<String>(config) { it.toByteArray() }
+            val producer = StreamingProducer<String>(
+                config = config,
+                keyExtractor = { it },
+                keyBytes = { it.toByteArray() },
+                serializer = { it.toByteArray() },
+            )
             val messages = (1..10).map { "msg-$it" }
-            Verify.that(producer.sendAll(Many.from(messages), key = { it }).toList())
+            Verify.that(producer.sendAll(Many.from(messages)).toList())
                 .matchesNext { assertEquals(messages.sorted(), it.sorted()) }
                 .completesNormally()
             runBlocking { producer.close().await() }
@@ -46,20 +51,24 @@ class StreamingKafkaTests {
         fun `sendAll with headersProvider attaches headers`() {
             val topicName = topic(bootstrapServers)
             val config = ProducerConfig(bootstrapServers, Topic(topicName))
-            val producer = StreamingProducer<String>(config) { it.toByteArray() }
+            val producer = StreamingProducer<String>(
+                config = config,
+                keyExtractor = { it },
+                keyBytes = { it.toByteArray() },
+                headerEnricher = { listOf(Header("trace-id", "${it}-123".toByteArray())) },
+                serializer = { it.toByteArray() },
+            )
             val payload = "hello"
-            val keyExtractor: Prozess.KeyExtraction<String> = { it }
-            val headerProvider: Prozess.HeadersProvider<String> = { listOf(Header("trace-id", "${it}-123".toByteArray())) }
-            runBlocking { producer.sendAll(Many.items(payload), keyExtractor, headerProvider).last() }
+            runBlocking { producer.sendAll(Many.items(payload)).last() }
             runBlocking { producer.close().await() }
 
             val receivedHeaders = mutableListOf<Headers>()
             val latch = java.util.concurrent.CountDownLatch(1)
             val consumer = Prozess.consumer(
                 config = ConsumerConfig(bootstrapServers, "groupId", setOf(topicName)),
-                deserializeBytes = { String(it) },
-                process = { received, _ ->
-                    receivedHeaders.add(received.headers)
+                messageDeserializer = { String(it) },
+                process = { headers, _, _ ->
+                    receivedHeaders.add(headers)
                     latch.countDown()
                 },
             )
