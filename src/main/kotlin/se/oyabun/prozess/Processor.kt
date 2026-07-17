@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 Oyabun AB
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package se.oyabun.prozess
 
 import se.oyabun.aelv.Many
@@ -13,6 +28,8 @@ import se.oyabun.aelv.flatMapSequential
 import se.oyabun.aelv.groupBy
 import se.oyabun.aelv.map
 import se.oyabun.aelv.mapNotNull
+import se.oyabun.aelv.doOnError
+import se.oyabun.aelv.doOnNext
 import se.oyabun.aelv.retry
 import se.oyabun.aelv.toList
 import se.oyabun.prozess.Prozess.DeserializationResult
@@ -26,6 +43,10 @@ import kotlin.time.Duration.Companion.milliseconds
  *
  * @param K the Kafka key type; [Nothing] for [Prozess.Consumer.Unkeyed] consumers.
  * @param M the deserialized value type.
+ * @param key      the deserialized record key.
+ * @param value    the deserialized message value.
+ * @param position the partition and offset of the original record.
+ * @param headers  the Kafka record headers.
  */
 data class Processable<out K, M>(
     val key: Key<K>,
@@ -34,12 +55,30 @@ data class Processable<out K, M>(
     val headers: Headers,
 )
 
+/**
+ * Configures the backoff policy applied when a processing handler throws.
+ *
+ * @param minBackoff initial backoff before the first retry.
+ * @param maxBackoff upper bound for exponential backoff growth.
+ */
 data class RetryConfig(
     val minBackoff: Duration = 1.seconds,
     val maxBackoff: Duration = 30.seconds,
 )
 
+/**
+ * Transforms a stream of raw Kafka records into a stream of committed [Position]s.
+ *
+ * Each [Position] emitted by [process] signals that the record at that offset
+ * has been fully handled and is safe to commit.
+ */
 interface Processor<M : Any> {
+    /**
+     * Applies this processor's deserialization and handling pipeline to [partition].
+     *
+     * @param partition a stream of raw records from a single Kafka partition.
+     * @return a stream of positions ready to commit.
+     */
     fun process(partition: Many<Received<ByteArray>>): Many<Position>
 }
 
@@ -58,6 +97,17 @@ internal class ContiguousOffsetTracker {
     }
 }
 
+/**
+ * Standard [Processor] implementation with four factory modes.
+ *
+ * All modes apply the same retry contract: if the handler throws, the entire
+ * operation is retried with exponential backoff according to [RetryConfig].
+ * Tombstone records and poison-pill records (where [DeserializationResult.PoisonPill]
+ * is returned) are logged and acknowledged without calling the handler.
+ *
+ * Create instances via the companion object factory functions rather than the
+ * constructor directly.
+ */
 class DefaultProcessor<M : Any> private constructor(
     private val pipeline: (Many<Received<ByteArray>>) -> Many<Position>,
 ) : Processor<M> {
@@ -69,6 +119,15 @@ class DefaultProcessor<M : Any> private constructor(
         private fun retryPolicy(retryConfig: RetryConfig): Policy.Retry =
             Policy.retry().withBackoff(retryConfig.minBackoff, retryConfig.maxBackoff).on { true }
 
+        /**
+         * Processes each record individually.
+         *
+         * @param keyMapper       maps the raw [ByteArray] key to [KafkaKey]; defaults to [Key.Missing].
+         * @param deserializer    converts the raw record to a [DeserializationResult].
+         * @param handler         called for each successfully deserialized record.
+         * @param retryConfig     backoff policy for handler failures.
+         * @param maxConcurrency  maximum number of records processed concurrently within a partition.
+         */
         fun <KafkaKey, M : Any> each(
             keyMapper: (Key<ByteArray>) -> Key<KafkaKey> = { Key.Missing },
             deserializer: Deserializer<M>,
@@ -78,19 +137,40 @@ class DefaultProcessor<M : Any> private constructor(
         ): DefaultProcessor<M> {
             val policy = retryPolicy(retryConfig)
             val log    = Logging.logger { }
-            fun processOne(received: Received<ByteArray>): One<Position> = One.defer {
-                when (val result = deserializer(received)) {
-                    is DeserializationResult.Message    -> { handler(Processable(keyMapper(received.key), result.value, received.position, received.headers)); received.position }
-                    is DeserializationResult.Tombstone  -> { log.processing.tombstone(received.position); received.position }
-                    is DeserializationResult.PoisonPill -> { log.processing.poisonPill(received.position, result.reason); received.position }
+            fun processOne(received: Received<ByteArray>): One<Position> {
+                var attempts = 0L
+                return One.defer {
+                    when (val result = deserializer(received)) {
+                        is DeserializationResult.Message    -> { handler(Processable(keyMapper(received.key), result.value, received.position, received.headers)); received.position }
+                        is DeserializationResult.Tombstone  -> { log.processing.tombstone(received.position); received.position }
+                        is DeserializationResult.PoisonPill -> { log.processing.poisonPill(received.position, result.reason); received.position }
+                    }
                 }
-            }.retry(policy)
+                .doOnError { cause -> log.processing.handlerRetrying(received.position, ++attempts, cause) }
+                .doOnNext  { if (attempts > 0) log.processing.handlerRecovered(received.position, attempts) }
+                .retry(policy)
+            }
 
             return DefaultProcessor { partition ->
                 partition.flatMapSequential(maxConcurrency) { received -> processOne(received).asMany() }
             }
         }
 
+        /**
+         * Collects records into time- or size-bounded batches and processes each batch atomically.
+         *
+         * All records in a batch are deserialized before [handler] is called. Tombstone and
+         * poison-pill records within the batch are acknowledged without entering the handler.
+         * If the handler throws, the entire batch is retried.
+         *
+         * @param keyMapper       maps the raw [ByteArray] key to [KafkaKey].
+         * @param deserializer    converts each raw record to a [DeserializationResult].
+         * @param handler         called with the full deserialized batch.
+         * @param batchSize       maximum number of records per batch.
+         * @param batchDuration   maximum time to wait before flushing a partial batch.
+         * @param retryConfig     backoff policy for handler failures.
+         * @param maxConcurrency  maximum number of batches processed concurrently within a partition.
+         */
         fun <KafkaKey, M : Any> batch(
             keyMapper: (Key<ByteArray>) -> Key<KafkaKey> = { Key.Missing },
             deserializer: Deserializer<M>,
@@ -131,6 +211,21 @@ class DefaultProcessor<M : Any> private constructor(
             }
         }
 
+        /**
+         * Groups records by a user-defined key and processes each key's records
+         * sequentially and concurrently across keys.
+         *
+         * A [ContiguousOffsetTracker] gates offset emission: an offset is only emitted
+         * once all lower offsets in the same partition have completed, preventing gaps
+         * in committed offsets caused by out-of-order key group completion.
+         *
+         * @param keyMapper      maps the raw [ByteArray] key to [KafkaKey].
+         * @param deserializer   converts each raw record to a [DeserializationResult].
+         * @param keyExtractor   extracts the grouping key from each [Processable].
+         * @param handler        called per-record with the grouping key and processable.
+         * @param retryConfig    backoff policy for handler failures.
+         * @param concurrency    maximum number of key groups processed concurrently.
+         */
         fun <GroupingKey : Any, KafkaKey, M : Any> groupedEach(
             keyMapper: (Key<ByteArray>) -> Key<KafkaKey> = { Key.Missing },
             deserializer: Deserializer<M>,
@@ -179,6 +274,21 @@ class DefaultProcessor<M : Any> private constructor(
             return DefaultProcessor { partition -> partitionPipeline(partition) }
         }
 
+        /**
+         * Groups records by a user-defined key and processes each key's records in
+         * size- or time-bounded batches.
+         *
+         * Like [groupedEach], a [ContiguousOffsetTracker] ensures safe offset emission.
+         *
+         * @param keyMapper      maps the raw [ByteArray] key to [KafkaKey].
+         * @param deserializer   converts each raw record to a [DeserializationResult].
+         * @param keyExtractor   extracts the grouping key from each [Processable].
+         * @param handler        called per-batch with the grouping key and list of processables.
+         * @param batchSize      maximum records per batch per key group.
+         * @param batchDuration  maximum time before flushing a partial batch.
+         * @param retryConfig    backoff policy for handler failures.
+         * @param concurrency    maximum number of key groups processed concurrently.
+         */
         fun <GroupingKey : Any, KafkaKey, M : Any> groupedBatch(
             keyMapper: (Key<ByteArray>) -> Key<KafkaKey> = { Key.Missing },
             deserializer: Deserializer<M>,

@@ -10,7 +10,12 @@ import org.junit.jupiter.api.Timeout
 import se.oyabun.aelv.drain
 import se.oyabun.aelv.take
 import se.oyabun.aelv.Verify
+import se.oyabun.aelv.None
+import se.oyabun.aelv.merge
+import se.oyabun.aelv.toMany
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 @Timeout(value = 5, unit = TimeUnit.SECONDS)
 class ReceivedBufferTest {
@@ -55,7 +60,7 @@ class ReceivedBufferTest {
             buffer.offer(r2)
         }
         Verify.that(buffer.asMany().take(2))
-            .emitsNext(r1).emitsNext(r2).completesNormally()
+            .emitsNext(r1, r2).completesNormally()
     }
 
     @Test
@@ -63,8 +68,7 @@ class ReceivedBufferTest {
         val buffer = InMemoryReceivedBuffer()
         val p = Partition(0, Topic("topic"))
         val record = Received(Key.Present("k".toByteArray()), ReceivedMessage.Data("v".toByteArray()), Position(p, 0))
-        Verify.that(buffer.asMany().take(1))
-            .runs { runBlocking { buffer.offer(record) } }
+        Verify.that(merge(buffer.asMany().take(1), None.defer<Received<ByteArray>> { buffer.offer(record) }.toMany()))
             .emitsNext(record)
             .completesNormally()
     }
@@ -76,12 +80,10 @@ class ReceivedBufferTest {
         val p = Partition(0, Topic("topic"))
         val a = Received(Key.Present("a".toByteArray()), ReceivedMessage.Data("a".toByteArray()), Position(p, 0))
         val b = Received(Key.Present("b".toByteArray()), ReceivedMessage.Data("b".toByteArray()), Position(p, 1))
-        Verify.that(buffer.asMany().take(2))
-            .runs { runBlocking { buffer.offer(a); buffer.offer(b) } }
-            .emitsNext(a).emitsNext(b).completesNormally()
+        Verify.that(merge(buffer.asMany().take(2), None.defer<Received<ByteArray>> { buffer.offer(a); buffer.offer(b) }.toMany()))
+            .emitsNext(a, b).completesNormally()
         val c = Received(Key.Present("c".toByteArray()), ReceivedMessage.Data("c".toByteArray()), Position(p, 2))
-        Verify.that(buffer.asMany().take(1))
-            .runs { runBlocking { buffer.offer(c) } }
+        Verify.that(merge(buffer.asMany().take(1), None.defer<Received<ByteArray>> { buffer.offer(c) }.toMany()))
             .emitsNext(c).completesNormally()
     }
 
@@ -100,7 +102,7 @@ class ReceivedBufferTest {
     }
 
     @Test
-    fun `thread safety for concurrent offers and flux drain`() {
+    fun `thread safety for concurrent offers and drain`() {
         val buffer = InMemoryReceivedBuffer()
         val p = Partition(0, Topic("topic"))
         runBlocking {
@@ -115,5 +117,35 @@ class ReceivedBufferTest {
             }
         }
         assertEquals(1000, buffer.size)
+    }
+
+    @Test
+    fun `onPause fires exactly once even when many offers exceed highWaterMark`() {
+        val pauseCount = AtomicInteger(0)
+        val buffer = InMemoryReceivedBuffer(highWaterMark = 3, onPause = { pauseCount.incrementAndGet() })
+        val p = Partition(0, Topic("topic"))
+        runBlocking {
+            repeat(10) { i -> buffer.offer(Received(Key.Present("k".toByteArray()), ReceivedMessage.Data("v".toByteArray()), Position(p, i.toLong()))) }
+        }
+        assertEquals(1, pauseCount.get(), "onPause must fire exactly once per saturation event")
+    }
+
+    @Test
+    fun `onResume fires exactly once when buffer drains below lowWaterMark`() {
+        val resumeCount = AtomicInteger(0)
+        val resumeLatch = CountDownLatch(1)
+        val buffer = InMemoryReceivedBuffer(
+            highWaterMark = 5,
+            lowWaterMark  = 2,
+            onResume = { resumeCount.incrementAndGet(); resumeLatch.countDown() },
+        )
+        val p = Partition(0, Topic("topic"))
+        runBlocking {
+            repeat(6) { i -> buffer.offer(Received(Key.Present("k".toByteArray()), ReceivedMessage.Data("v".toByteArray()), Position(p, i.toLong()))) }
+        }
+        // Drain until resume fires
+        buffer.asMany().take(5).drain({}, {})
+        assertTrue(resumeLatch.await(3, TimeUnit.SECONDS), "onResume must fire after draining below lowWaterMark")
+        assertEquals(1, resumeCount.get(), "onResume must fire exactly once")
     }
 }

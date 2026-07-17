@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 Oyabun AB
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package se.oyabun.prozess
 
 import kotlinx.coroutines.CoroutineScope
@@ -29,13 +44,73 @@ import kotlin.time.Clock
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
+/**
+ * Asynchronously commits processed Kafka offsets in batches.
+ *
+ * Callers report processed records via [markProcessed]. The committer
+ * accumulates positions and flushes them to Kafka in configurable batches
+ * (by count or time). Offsets for unassigned partitions are filtered before
+ * committing to avoid illegal-state errors during rebalances.
+ *
+ * [start] must be called before [markProcessed]. [stop] drains and commits
+ * all pending positions before returning.
+ */
 interface Committer {
+    /**
+     * Records that [position] has been fully processed.
+     *
+     * Updates the internal offset map (taking the highest offset seen per
+     * partition) and feeds [position] into the commit pipeline.
+     */
     suspend fun markProcessed(position: Position)
+
+    /**
+     * Pre-populates the internal offset map with [offsets] without emitting
+     * them into the commit pipeline.
+     *
+     * Used for catch-up completion detection: the consumer seeds end-offsets
+     * so the completion check has a reference point even before the commit
+     * pipeline fires.
+     */
     fun seedOffsets(offsets: Offsets)
+
+    /**
+     * Hot stream of every [Position] passed to [markProcessed].
+     *
+     * Subscribers receive all positions emitted since they subscribed. Used
+     * internally for catch-up completion detection.
+     */
     val positions: Many<Position>
+
+    /**
+     * Snapshot of the highest processed offset per partition seen so far.
+     *
+     * The value is `offset + 1` (the next expected offset), matching Kafka's
+     * commit convention.
+     */
     val processedOffsets: Offsets
+
+    /**
+     * Hot stream of committed offset maps.
+     *
+     * Emits once after each successful Kafka commit. Useful for observing
+     * commit progress or writing integration tests.
+     */
     val committedOffsets: Many<Offsets>
+
+    /**
+     * Starts the internal commit pipeline on a dedicated thread.
+     *
+     * @throws CommitterAlreadyRunning if called on an already-running committer.
+     */
     fun start()
+
+    /**
+     * Drains remaining positions and stops the commit pipeline.
+     *
+     * Returns a [None] that completes once the pipeline has fully drained and
+     * the background thread has exited.
+     */
     fun stop(): None<Unit>
 }
 
@@ -66,7 +141,9 @@ internal class BufferedCommitter(
     override val committedOffsets: Many<Offsets> get() = committedOffsetsSink.asMany()
 
     override fun seedOffsets(offsets: Offsets) {
-        processedOffsetsRef.update { it + offsets }
+        processedOffsetsRef.update { current ->
+            current + offsets.mapValues { (partition, seed) -> maxOf(current[partition] ?: 0L, seed) }
+        }
     }
 
     override suspend fun markProcessed(position: Position) {
@@ -95,7 +172,7 @@ internal class BufferedCommitter(
                             log.kafka.committed(instanceId, latest.keys)
                             committedOffsetsSink.tryEmit(committed)
                         }
-                        .withRetries(instanceId, log)
+                        .withRetries()
                         .flatMapMany { Many.empty<Unit>() }
                 }
                 .retry(Policy.retry().withBackoff(500.milliseconds, 30.seconds))

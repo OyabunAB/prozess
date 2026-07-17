@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 Oyabun AB
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package se.oyabun.prozess
 
 import org.apache.kafka.common.errors.AuthenticationException
@@ -34,22 +49,32 @@ sealed class ProzessException(message: String, cause: Throwable? = null) : Runti
     }
 }
 
+/** Thrown when a consumer operation is attempted after [Prozess.Consumer.shutdown]. */
 class ConsumerNotActive(message: String) : ProzessException(message)
 
+/** Thrown by [Poller.start] when the poller is already running. */
 class PollerAlreadyRunning(message: String) : ProzessException(message)
 
+/** Thrown by [Poller.pause] or [Poller.resume] when the poller is not running. */
 class PollerNotRunning(message: String) : ProzessException(message)
 
+/** Thrown by [Committer.start] when the committer is already running. */
 class CommitterAlreadyRunning(message: String) : ProzessException(message)
 
+/** Thrown when a Kafka offset commit fails and retries are exhausted. */
 class CommitFailure(message: String, cause: Throwable? = null) : ProzessException(message, cause)
 
+/** Thrown when an operation fails and all retry attempts are exhausted. */
 class RetryExhausted(message: String, cause: Throwable) : ProzessException(message, cause)
 
+/** Thrown when [Prozess.Producer.send] or [Prozess.Producer.sendAll] fails. */
 class SendFailure(message: String, cause: Throwable) : ProzessException(message, cause)
 
+/** Thrown when a Kafka operation exceeds its configured timeout. */
 class TimeoutExpired(message: String, cause: Throwable? = null) : ProzessException(message, cause)
 
+/** Thrown when SASL authentication or ACL authorization fails. */
 class AuthenticationFailure(message: String, cause: Throwable) : ProzessException(message, cause)
 
+/** Thrown when Kafka cannot serialize or deserialize a record. */
 class SerializationFailure(message: String, cause: Throwable) : ProzessException(message, cause)

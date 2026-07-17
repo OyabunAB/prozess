@@ -1,6 +1,5 @@
 package se.oyabun.prozess
 
-import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.Nested
@@ -9,7 +8,6 @@ import org.junit.jupiter.api.TestInstance
 import org.junit.jupiter.api.TestInstance.Lifecycle
 import org.testcontainers.kafka.KafkaContainer
 import se.oyabun.aelv.Many
-import se.oyabun.aelv.last
 import se.oyabun.aelv.toList
 import se.oyabun.aelv.Verify
 import kotlin.test.assertEquals
@@ -42,9 +40,9 @@ class StreamingKafkaTests {
             )
             val messages = (1..10).map { "msg-$it" }
             Verify.that(producer.sendAll(Many.from(messages)).toList())
-                .matchesNext { assertEquals(messages.sorted(), it.sorted()) }
+                .assertNext { assertEquals(messages.sorted(), it.sorted()) }
                 .completesNormally()
-            runBlocking { producer.close().await() }
+            Verify.that(producer.close()).completesNormally()
         }
 
         @Test
@@ -59,8 +57,8 @@ class StreamingKafkaTests {
                 serializer = { it.toByteArray() },
             )
             val payload = "hello"
-            runBlocking { producer.sendAll(Many.items(payload)).last() }
-            runBlocking { producer.close().await() }
+            Verify.that(producer.sendAll(Many.items(payload))).completesNormally()
+            Verify.that(producer.close()).completesNormally()
 
             val receivedHeaders = mutableListOf<Headers>()
             val latch = java.util.concurrent.CountDownLatch(1)

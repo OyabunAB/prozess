@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 Oyabun AB
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package se.oyabun.prozess
 
 import org.apache.kafka.clients.consumer.ConsumerConfig as ApacheConsumerConfig
@@ -10,8 +25,23 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 
+/**
+ * Controls whether the producer participates in Kafka transactions.
+ *
+ * Use [Disabled] for non-transactional producers (default). Use [Enabled]
+ * to activate exactly-once semantics by assigning a stable [Enabled.id].
+ * When enabled, acks are automatically forced to `all`.
+ */
 sealed interface TransactionalConfig {
+    /** Non-transactional producer. [acks] controls durability. */
     data class Disabled(val acks: ProducerConfig.Acks = ProducerConfig.Acks.Leader) : TransactionalConfig
+
+    /**
+     * Transactional producer with the given stable [id].
+     *
+     * The [id] must be unique across all active producer instances in the
+     * same application to avoid fencing.
+     */
     data class Enabled(val id: String) : TransactionalConfig {
         init {
             require(id.isNotBlank()) { "transactional.id must not be blank" }
@@ -19,6 +49,24 @@ sealed interface TransactionalConfig {
     }
 }
 
+/**
+ * Typed configuration for a Kafka producer.
+ *
+ * All tuning knobs map directly to their Kafka client property equivalents.
+ * The internal [toKafkaProperties] method translates this to the raw map
+ * Apache's [org.apache.kafka.clients.producer.KafkaProducer] expects.
+ *
+ * @param bootstrapServers comma-separated `host:port` list.
+ * @param topic            the default target topic for [Prozess.Producer.send].
+ * @param compression      codec applied to record batches before transmission.
+ * @param linger           artificial delay to allow batching; `ZERO` means send immediately.
+ * @param batchSize        maximum bytes per record batch.
+ * @param maxInFlight      maximum in-flight requests per connection.
+ * @param bufferMemory     total bytes of memory the producer may use for buffering.
+ * @param requestTimeout   timeout for broker acknowledgement.
+ * @param transactional    transaction mode — [TransactionalConfig.Disabled] by default.
+ * @param security         security protocol; [SecurityProtocol.Plaintext] by default.
+ */
 data class ProducerConfig(
     val bootstrapServers: String,
     val topic: Topic,
@@ -31,9 +79,17 @@ data class ProducerConfig(
     val transactional: TransactionalConfig = TransactionalConfig.Disabled(),
     val security: SecurityProtocol = SecurityProtocol.Plaintext,
 ) {
+    /** Durability guarantee for produced records. */
     enum class Acks(val value: String) {
-        None("0"), Leader("1"), All("all")
+        /** Fire-and-forget — no acknowledgement required. */
+        None("0"),
+        /** Leader acknowledgement only. */
+        Leader("1"),
+        /** All in-sync replicas must acknowledge. Required for transactions. */
+        All("all"),
     }
+
+    /** Compression codec applied to record batches. */
     enum class Compression(val value: String) {
         None("none"), Gzip("gzip"), Snappy("snappy"), Lz4("lz4"), Zstd("zstd")
     }
@@ -59,6 +115,33 @@ data class ProducerConfig(
     }
 }
 
+/**
+ * Typed configuration for a Kafka consumer.
+ *
+ * All tuning knobs map directly to their Kafka client property equivalents.
+ * The internal [toKafkaProperties] extension translates this to the raw map
+ * Apache's [org.apache.kafka.clients.consumer.KafkaConsumer] expects.
+ *
+ * @param bootstrapServers   comma-separated `host:port` list.
+ * @param groupId            consumer group identifier.
+ * @param topics             set of topic names to subscribe to.
+ * @param clientId           optional client identifier shown in Kafka metrics.
+ * @param groupInstanceId    optional static member id for cooperative rebalancing.
+ * @param startOffset        default offset reset strategy; overridden per [Prozess.Consumer.start] call.
+ * @param pollInterval       time between [KafkaClient.poll] calls.
+ * @param sessionTimeout     Kafka broker session timeout.
+ * @param heartbeatInterval  interval between heartbeats to the group coordinator.
+ * @param maxPollInterval    maximum time between polls before the consumer is considered dead.
+ * @param maxPollRecords     maximum records returned per poll; also sets buffer high-water mark.
+ * @param fetchMinBytes      minimum bytes the broker should accumulate before responding.
+ * @param fetchMaxBytes      maximum bytes the broker may return per fetch.
+ * @param fetchMaxWait       maximum time the broker waits before returning a fetch response.
+ * @param maxPartitionFetchBytes maximum bytes fetched per partition per request.
+ * @param isolationLevel     read-uncommitted or read-committed (for transactional producers).
+ * @param security           security protocol; [SecurityProtocol.Plaintext] by default.
+ * @param commitBatchSize    maximum positions per commit batch.
+ * @param commitBatchTimeout maximum time before a partial batch is flushed.
+ */
 data class ConsumerConfig(
     val bootstrapServers: String,
     val groupId: String,
@@ -80,14 +163,18 @@ data class ConsumerConfig(
     val commitBatchSize: Int = 25,
     val commitBatchTimeout: Duration = 1.seconds,
 ) {
+    /** Convenience constructor that accepts topic names as a vararg. */
     constructor(bootstrapServers: String, groupId: String, vararg topics: String) : this(
         bootstrapServers = bootstrapServers,
         groupId = groupId,
         topics = setOf(*topics),
     )
 
+    /** Controls visibility of transactional messages. */
     enum class IsolationLevel(val value: String) {
+        /** Default — reads all records, including uncommitted transactional ones. */
         ReadUncommitted("read_uncommitted"),
+        /** Only reads records from committed transactions. */
         ReadCommitted("read_committed"),
     }
 }

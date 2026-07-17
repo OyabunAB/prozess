@@ -2,6 +2,11 @@ package se.oyabun.prozess
 
 import kotlinx.coroutines.runBlocking
 import se.oyabun.aelv.first
+import se.oyabun.aelv.merge
+import se.oyabun.aelv.take
+import se.oyabun.aelv.Many
+import se.oyabun.aelv.None
+import se.oyabun.aelv.toMany
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.assertThrows
@@ -160,14 +165,14 @@ class CommitterTest {
     }
 
     @Test
-    fun `positions flux emits marked positions`() {
+    fun `positions emits marked positions`() {
         val c = committer()
-        Verify.that(c.positions)
-            .isSubscribed()
-            .runs { runBlocking { c.markProcessed(Position(p0, 5L)) } }
-            .emitsNext(Position(p0, 5L))
-            .runs { runBlocking { c.markProcessed(Position(p1, 10L)) } }
-            .emitsNext(Position(p1, 10L))
+        val driver: Many<Position> = None.defer<Position> {
+            c.markProcessed(Position(p0, 5L))
+            c.markProcessed(Position(p1, 10L))
+        }.toMany()
+        Verify.that(merge(c.positions.take(2), driver))
+            .emitsNext(Position(p0, 5L), Position(p1, 10L))
             .thenCancels()
             .verify()
     }
@@ -275,6 +280,15 @@ class CommitterTest {
         assertEquals(mapOf(p0 to 51L), c.processedOffsets)
         runBlocking { c.stop().await() }
         assertEquals(mapOf(p0 to 51L), c.processedOffsets)
+    }
+
+    @Test
+    fun `seedOffsets does not overwrite higher offset already recorded by markProcessed`() {
+        val c = committer()
+        runBlocking { c.markProcessed(Position(p0, 50L)) }
+        assertEquals(mapOf(p0 to 51L), c.processedOffsets)
+        c.seedOffsets(mapOf(p0 to 10L))
+        assertEquals(mapOf(p0 to 51L), c.processedOffsets, "seedOffsets must not regress a higher processed offset")
     }
 
     @Test

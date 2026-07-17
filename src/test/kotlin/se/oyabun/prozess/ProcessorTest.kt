@@ -45,9 +45,7 @@ class ProcessorTest {
         val messages = Many.items(received(p0, 0), received(p0, 1), received(p0, 2))
 
         Verify.that(processor.process(messages))
-            .emitsNext(Position(p0, 0))
-            .emitsNext(Position(p0, 1))
-            .emitsNext(Position(p0, 2))
+            .emitsNext(Position(p0, 0), Position(p0, 1), Position(p0, 2))
             .completesNormally()
     }
 
@@ -115,8 +113,7 @@ class ProcessorTest {
         )
 
         Verify.that(processor.process(messages))
-            .emitsNext(Position(p0, 0), Position(p0, 1), Position(p0, 2))
-            .emitsNext(Position(p0, 3), Position(p0, 4))
+            .emitsNext(Position(p0, 0), Position(p0, 1), Position(p0, 2), Position(p0, 3), Position(p0, 4))
             .completesNormally()
     }
 
@@ -603,5 +600,109 @@ class ProcessorTest {
         assertTrue(positions.isNotEmpty())
         assertEquals(Position(p0, 2), positions.last())
         assertEquals(listOf("a", "c"), processed)
+    }
+
+    @Test
+    fun `batch skips handler when all records are tombstones or poison pills`() {
+        var handlerCalled = false
+        val processor = DefaultProcessor.batch<Nothing, String>(
+            deserializer = { r ->
+                if (r.position.offset % 2 == 0L) DeserializationResult.Tombstone
+                else DeserializationResult.PoisonPill("bad")
+            },
+            handler = { _ -> handlerCalled = true },
+            batchSize = 4,
+        )
+        Verify.that(processor.process(Many.items(
+            received(p0, 0), received(p0, 1), received(p0, 2), received(p0, 3),
+        )))
+            .emitsNext(Position(p0, 0), Position(p0, 1), Position(p0, 2), Position(p0, 3))
+            .completesNormally()
+        assertTrue(!handlerCalled, "handler must not be called when all records are skipped")
+    }
+
+    @Test
+    fun `groupedBatch acknowledges tombstones and poison pills without calling handler`() {
+        val handledValues = mutableListOf<String>()
+        val processor = DefaultProcessor.groupedBatch<String, Nothing, String>(
+            deserializer = { r ->
+                when (r.position.offset) {
+                    1L   -> DeserializationResult.Tombstone
+                    2L   -> DeserializationResult.PoisonPill("bad")
+                    else -> when (val msg = r.message) {
+                        is ReceivedMessage.Data -> DeserializationResult.Message(String(msg.bytes))
+                        is ReceivedMessage.Tombstone -> DeserializationResult.Tombstone
+                    }
+                }
+            },
+            keyExtractor = { p -> p.value },
+            handler = { _, batch -> batch.forEach { handledValues.add(it.value) } },
+            batchSize = 10,
+        )
+        val positions = runBlocking {
+            when (val result = processor.process(Many.items(
+                received(p0, 0, "a"),
+                received(p0, 1, "tombstone-msg"),
+                received(p0, 2, "poison-msg"),
+                received(p0, 3, "b"),
+            )).toList().await()) {
+                is Success -> result.value
+                is Failure -> fail("expected success: ${result.value}")
+            }
+        }
+        // Tracker gates: all 4 offsets complete so final position emitted
+        assertTrue(positions.isNotEmpty(), "positions must be emitted")
+        assertEquals(Position(p0, 3), positions.last(), "final position must be offset 3")
+        assertEquals(listOf("a", "b").sorted(), handledValues.sorted(), "only real records reach handler")
+    }
+
+    @Test
+    fun `groupedBatch retries on transient handler failure`() {
+        var attempts = 0
+        val processor = DefaultProcessor.groupedBatch<String, Nothing, String>(
+            deserializer = { r ->
+                when (val msg = r.message) {
+                    is ReceivedMessage.Data -> DeserializationResult.Message(String(msg.bytes))
+                    is ReceivedMessage.Tombstone -> DeserializationResult.Tombstone
+                }
+            },
+            keyExtractor = { p -> p.value },
+            handler = { _, _ ->
+                attempts++
+                if (attempts < 3) throw RuntimeException("transient")
+            },
+            batchSize = 2,
+            retryConfig = RetryConfig(minBackoff = 10.milliseconds),
+        )
+        Verify.that(processor.process(Many.items(received(p0, 0, "a"), received(p0, 1, "b"))))
+            .emitsNext(Position(p0, 0), Position(p0, 1))
+            .completesNormally()
+        assertTrue(attempts >= 3, "handler must be retried at least 3 times, was: $attempts")
+    }
+
+    @Test
+    fun `ContiguousOffsetTracker returns null for offset below current watermark`() {
+        val tracker = ContiguousOffsetTracker()
+        val p = Partition(0, Topic("test"))
+        tracker.onCompleted(Position(p, 0))
+        tracker.onCompleted(Position(p, 1))
+        tracker.onCompleted(Position(p, 2))
+        val result = tracker.onCompleted(Position(p, 1))
+        assertNull(result, "offset below watermark must return null")
+    }
+
+    @Test
+    fun `ContiguousOffsetTracker instances are independent`() {
+        val p = Partition(0, Topic("test"))
+        val a = ContiguousOffsetTracker()
+        val b = ContiguousOffsetTracker()
+        // Advance tracker A through offsets 0 and 1
+        a.onCompleted(Position(p, 0))
+        a.onCompleted(Position(p, 1))
+        // Tracker B should still be at watermark 0 — offset 0 returns position, 1 returns null (gap)
+        val bResult0 = b.onCompleted(Position(p, 0))
+        assertEquals(Position(p, 0), bResult0, "tracker B must be independent — advancing A must not affect B")
+        val bResult1 = b.onCompleted(Position(p, 1))
+        assertEquals(Position(p, 1), bResult1, "tracker B must advance normally after offset 0")
     }
 }

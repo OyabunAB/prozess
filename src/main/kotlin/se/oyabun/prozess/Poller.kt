@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 Oyabun AB
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package se.oyabun.prozess
 
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -23,11 +38,44 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
+/**
+ * Drives the Kafka poll loop and feeds records into the [ReceivedBuffer].
+ *
+ * The poller runs independently of the processing pipeline, pushing records
+ * into the buffer as fast as the buffer accepts them. Backpressure is applied
+ * externally via [pause] and [resume], which delegate to [KafkaClient.pause]
+ * and [KafkaClient.resume] on the currently assigned partitions.
+ */
 interface Poller {
+    /**
+     * Starts the poll loop on a background coroutine.
+     *
+     * @throws PollerAlreadyRunning if called on an already-running poller.
+     */
     fun start()
+
+    /**
+     * Stops the poll loop and waits for the background coroutine to exit.
+     *
+     * Returns a [None] that completes once the poller has fully stopped.
+     */
     fun stop(): None<Unit>
+
+    /**
+     * Pauses fetching on all currently assigned partitions.
+     *
+     * @throws PollerNotRunning if the poller is not running.
+     */
     fun pause()
+
+    /**
+     * Resumes fetching on all currently assigned partitions.
+     *
+     * @throws PollerNotRunning if the poller is not running.
+     */
     fun resume()
+
+    /** `true` if the poll loop is currently running. */
     val isRunning: Boolean
 }
 

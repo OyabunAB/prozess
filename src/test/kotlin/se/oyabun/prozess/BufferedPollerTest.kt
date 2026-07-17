@@ -141,6 +141,41 @@ class BufferedPollerTest {
         assertTrue(!p2.isRunning)
     }
 
+    @Test
+    fun `stop after start and stop on same instance is a no-op`() {
+        val poller = createPoller()
+        poller.start()
+        runBlocking { poller.stop().await() }
+        assertTrue(!poller.isRunning)
+        runBlocking { poller.stop().await() }
+        assertTrue(!poller.isRunning, "second stop must not throw or block")
+    }
+
+    @Test
+    fun `pause and resume with empty assignments does not call client`() {
+        val client = FakeKafkaClient()
+        val buffer = InMemoryReceivedBuffer()
+        val poller = BufferedPoller(
+            client = client,
+            buffer = buffer,
+            assignments = { emptySet() },
+            instanceId = "test-empty",
+            pollInterval = 100.milliseconds,
+            shutdownSink = se.oyabun.aelv.Sinks.broadcast(),
+            doneSink = se.oyabun.aelv.Sinks.broadcast(),
+            log = Logging.logger { },
+        )
+        poller.start()
+        try {
+            poller.pause()
+            poller.resume()
+            assertTrue(client.pausedPartitions.isEmpty(), "pause with empty assignments must not call client.pause")
+            assertTrue(client.resumedPartitions.isEmpty(), "resume with empty assignments must not call client.resume")
+        } finally {
+            runBlocking { poller.stop().await() }
+        }
+    }
+
     private fun createPoller(): BufferedPoller {
         val client = FakeKafkaClient()
         val buffer = InMemoryReceivedBuffer()

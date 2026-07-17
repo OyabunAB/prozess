@@ -1,222 +1,314 @@
 # prozess
 
-Reactive Kafka consumer/producer built on [aelv](https://github.com/OyabunAB/aelv) and kotlinx-coroutines.
+Reactive Kafka consumer/producer library for Kotlin, built on [aelv](https://github.com/OyabunAB/aelv) and kotlinx-coroutines.
 
-## Performance
+## Dependency
 
-See [BENCHMARKS.md](BENCHMARKS.md) for a full comparison against raw `kafka-clients`,
-Spring Kafka, and Vert.x Kafka covering throughput, concurrent handler execution,
-grouped/ordered processing, and memory pressure under backpressure.
+```kotlin
+// Gradle (libs.versions.toml)
+prozess = "1.0.0-rc.5"
+
+// build.gradle.kts
+implementation("se.oyabun:prozess:1.0.0-rc.5")
+```
+
+Requires Kotlin 2.4+ and JVM 21+.
+
+## Quick Start
+
+### Consumer
+
+```kotlin
+val config = ConsumerConfig(
+    bootstrapServers = "localhost:9092",
+    groupId          = "my-group",
+    topics           = setOf("orders"),
+)
+
+val consumer = Prozess.consumer(config, { String(it) }) { headers, key, order ->
+    println("Received: $order")
+}
+
+consumer.start()
+// ... consumer runs until shutdown()
+consumer.shutdown()
+```
+
+### Producer
+
+```kotlin
+val config = ProducerConfig(
+    bootstrapServers = "localhost:9092",
+    topic            = Topic("orders"),
+)
+
+val producer = Prozess.producer(config, { it.toByteArray() })
+producer.sendAll(listOf("order-1", "order-2", "order-3"))
+producer.close()
+```
+
+---
 
 ## Consumer Architecture
 
-The consumer has two independent pipelines sharing an in-memory buffer:
+Two independent pipelines share an in-memory buffer. Backpressure flows from the processing chain through the buffer to the poller.
 
+```mermaid
+flowchart LR
+    subgraph Poller["Poller (own thread)"]
+        P1[poll interval] --> P2[client.poll]
+        P2 --> P3[buffer.offer]
+    end
+
+    subgraph Buffer["InMemoryReceivedBuffer"]
+        B1[ConcurrentLinkedQueue]
+        B2{size >= highWaterMark?}
+        B3[onPause callback]
+        B4{size < lowWaterMark?}
+        B5[onResume callback]
+        B1 --> B2
+        B2 -- yes --> B3
+        B4 -- yes --> B5
+    end
+
+    subgraph Processing["Processing Pipeline (per partition)"]
+        R1[filter: assigned partitions] --> R2[groupBy partition]
+        R2 --> R3[processor.process]
+        R3 --> R4[committer.markProcessed]
+    end
+
+    subgraph Committer["Committer (own thread)"]
+        C1[bufferTimeout] --> C2[filter unassigned]
+        C2 --> C3[max offset per partition]
+        C3 --> C4[client.commit]
+    end
+
+    P3 --> B1
+    B1 --> R1
+    R4 --> C1
+    B1 --> B4
 ```
-   Poller                         Committer
-  ┌─────────────────────┐        ┌──────────────────────┐
-  │ Flux.interval       │        │ Sinks.Many<Position> │
-  │  ─► client.poll()   │──buf──►│  ─► bufferTimeout()  │
-  │  ─► buffer.offer()  │ filter │  ─► client.commit()  │
-  └─────────┬───────────┘   │    └──────────────────────┘
-            │               │
-       pause/resume         ▼
-  (via buffer callbacks)  Processing chain
-                          (groupBy, flatMap,
-                           deserialize, process,
-                           committer.markProcessed)
-```
 
-The poller runs on its own single-thread scheduler. The committer runs its commit pipeline on another. The processing chain between buffer and committer is composed inline in `StreamingConsumer.start()` — no separate scheduler, reactive back-pressure propagates from the processing chain through the buffer to the poller.
+### Component responsibilities
 
-Partition assignment filtering happens inline via `.filter { it.position.partition in partitionManager.assignments() }` on `buffer.asFlux()` — unassigned records are silently dropped before reaching the processing chain.
+| Component | Responsibility |
+|---|---|
+| `BufferedPoller` | Calls `client.poll()` on a loop; feeds records into the buffer; retries on transient poll failures |
+| `InMemoryReceivedBuffer` | FIFO queue with high/low watermark callbacks for backpressure; wake-signal channel for demand-driven drain |
+| `StreamingConsumer` | Wires all components; routes records per-partition through `Processor`; commits positions via `Committer` |
+| `CoordinatingPartitionManager` | Handles rebalance events; commits on revocation; applies seeks on assignment; detects catch-up completion |
+| `BufferedCommitter` | Batches processed positions by count/time; filters unassigned partitions; retries commits indefinitely |
+| `ThreadsafeKafkaClient` | Serialises all Kafka consumer calls through a single-thread dispatcher |
 
-### Processor
+---
 
-The `Processor` abstraction (see [Processor.kt](src/main/kotlin/se/oyabun/prozess/Processor.kt)) encapsulates deserialization, handler invocation, and retry/backoff. The consumer builder API ([Prozess.kt](src/main/kotlin/se/oyabun/prozess/Prozess.kt)) constructs the processing pipeline:
+## Consumer Processing Modes
+
+All modes share the same contracts:
+- **Tombstones** (null-value records) are logged at INFO and acknowledged.
+- **Poison pills** (returned from the deserializer) are logged at WARN and acknowledged.
+- **Handler failures** are retried with exponential backoff per `RetryConfig`.
+
+### Per-message (`each`)
 
 ```kotlin
-// Per-message processing
 Prozess.consumer(config, deserializer)
-    .each { p -> handleMessage(p.received, p.value) }
-    .start()
-
-// Batched processing (atomic batches)
-Prozess.consumer(config, deserializer)
-    .batch(size = 10, duration = 1.seconds) { batch ->
-        handleBatch(batch.map { it.value })
-    }
-    .start()
-
-// Key-grouped processing (per-key ordering)
-Prozess.consumer(config, deserializer)
-    .groupBy { p -> p.value.userId }
-    .each { key, p -> handleUser(key, p.value) }
-    .start()
-
-// Key-grouped batches (per-key batching)
-Prozess.consumer(config, deserializer)
-    .groupBy { p -> p.value.userId }
-    .batch(size = 10) { key, batch ->
-        handleUserBatch(key, batch.map { it.value })
+    .each { p ->
+        database.save(p.value)
     }
     .start()
 ```
 
-The retry policy is backoff-only — messages are retried indefinitely (never exhausted). Configure via `RetryConfig`:
+### Batched (`batch`)
+
+Records are collected into windows by count or time. The handler receives the full batch atomically — if it throws, the whole batch is retried.
+
+```kotlin
+Prozess.consumer(config, deserializer)
+    .batch(size = 100, duration = 1.seconds) { batch ->
+        database.bulkInsert(batch.map { it.value })
+    }
+    .start()
+```
+
+### Key-grouped per-message (`groupBy + each`)
+
+Records are routed to groups by an application-level key. Records within the same group are processed sequentially; groups are processed concurrently. A `ContiguousOffsetTracker` prevents offset gaps from out-of-order group completion.
+
+```kotlin
+Prozess.consumer(config, deserializer)
+    .groupBy { p -> p.value.userId }
+    .each { userId, p ->
+        userCache.update(userId, p.value)
+    }
+    .start()
+```
+
+### Key-grouped batches (`groupBy + batch`)
+
+```kotlin
+Prozess.consumer(config, deserializer)
+    .groupBy { p -> p.value.tenantId }
+    .batch(size = 50) { tenantId, batch ->
+        tenantService.process(tenantId, batch.map { it.value })
+    }
+    .start()
+```
+
+### Custom processor
+
+For full pipeline control:
+
+```kotlin
+val processor = object : Processor<MyMessage> {
+    override fun process(partition: Many<Received<ByteArray>>): Many<Position> =
+        partition.map { received -> /* ... */; received.position }
+}
+
+Prozess.consumer(config, deserializer)
+    .processor(processor)
+    .start()
+```
+
+---
+
+## Offset Control
+
+### Start offsets
+
+Pass a `StartOffset` to `Consumer.start()`:
+
+```kotlin
+consumer.start(from = StartOffset.Earliest)
+consumer.start(from = StartOffset.Latest)           // default
+consumer.start(from = StartOffset.AtTimestamp(instant))
+```
+
+`AtTimestamp` seeks each partition to the first message at or after the given `Instant`. If no message exists at that timestamp the consumer seeks to the end of the partition.
+
+### Catch-up mode
+
+`EndOffset.CatchUp` makes the consumer read up to the offsets that were current at subscription time and then stop normally. Useful for one-shot backfill jobs.
+
+```kotlin
+consumer.start(
+    from  = StartOffset.Earliest,
+    until = EndOffset.CatchUp,
+)
+```
+
+### Retry configuration
+
+Handler retry backoff is configured via `RetryConfig` on the `DefaultProcessor` factory methods:
 
 ```kotlin
 Prozess.consumer(config, deserializer)
     .each(
-        maxConcurrency = 4,
-        retryConfig = RetryConfig(
-            minBackoff = 500.milliseconds,
-            maxBackoff = 30.seconds,
-        ),
-    ) { p -> handle(p.value) }
+        handler     = { p -> processMessage(p.value) },
+        retryConfig = RetryConfig(minBackoff = 100.milliseconds, maxBackoff = 10.seconds),
+    )
     .start()
 ```
 
-Key-grouped processing uses a `ContiguousOffsetTracker` to prevent offset gaps when concurrent key groups complete out of order — positions are only emitted when a contiguous prefix is complete.
+---
 
-### ReceivedBuffer
+## Lifecycle Events
 
-The `ReceivedBuffer` interface (see [Buffering.kt](src/main/kotlin/se/oyabun/prozess/Buffering.kt)) connects the poller to the processing chain:
-
-- `offer()` — Poller writes records into the buffer.
-- `size` — O(1) counter used for watermark back-pressure decisions.
-- `asFlux()` — reactive stream view consumed by the processing pipeline.
-
-#### Back-pressure
-
-The `InMemoryReceivedBuffer` implementation owns the back-pressure contract via high/low watermarks and callbacks:
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `highWaterMark` | `Int.MAX_VALUE` | When `size >= highWaterMark`, `onPause()` is called |
-| `lowWaterMark` | 0 | When `size < lowWaterMark` after drain, `onResume()` is called |
-| `onPause` | no-op | Pauses Kafka partitions (calls `client.pause()`) |
-| `onResume` | no-op | Resumes Kafka partitions (calls `client.resume()`) |
-
-The `highWaterMark` equals `config.maxPollRecords` (default 500). The `lowWaterMark` is `maxPollRecords / 4` (default 125).
-
-When the buffer reaches `highWaterMark`, the `onPause` callback pauses all assigned partitions. Kafka buffers data server-side but stops returning it on `poll()` calls. The poller continues ticking — each tick calls `poll()` (returns empty). The processing chain drains the buffer and the `onResume` callback fires once the buffer drops below `lowWaterMark`.
-
-This prevents the buffer from growing unbounded while downstream processing catches up, without blocking the poller thread. The pause/resume contract lives in one place: the buffer.
-
-### Poller
-
-The Poller (`BufferedPoller`) runs the poll loop on a single scheduler thread, calling `client.poll()` at a fixed interval and pushing received records into the `ReceivedBuffer`.
-
-#### Lifecycle
-
-```
-       start()
-         │
-         ▼
-  ┌─────────────┐
-  │   RUNNING   │
-  │             │◄─────────────────┐
-  │  interval   │  retry on error  │
-  │  ─► poll()  │──────────────────┘
-  │  ─► offer() │   (retryWhen)
-  └──────┬──────┘
-         │
-    shutdown signal  or  stop()
-         │
-         ▼
-  ┌─────────────┐
-  │  COMPLETED  │  ─► done signal emitted
-  │             │  ─► running = false
-  └─────────────┘
+```mermaid
+stateDiagram-v2
+    [*] --> Started : start()
+    Started --> Assigned : partition assigned
+    Assigned --> Revoked : rebalance
+    Revoked --> Assigned : rebalance
+    Assigned --> Paused : pause()
+    Paused --> Resumed : resume()
+    Resumed --> Assigned
+    Assigned --> Committed : offset batch committed
+    Assigned --> Stopped : shutdown()
+    Paused --> Stopped : shutdown()
+    Stopped --> [*]
 ```
 
-#### Use Cases
+Subscribe to events:
 
-| # | Use Case | Trigger | Behaviour |
-|---|----------|---------|-----------|
-| 1 | Normal polling | `Flux.interval` tick | Calls `poll()`, pushes records into buffer via `offer()` |
-| 2 | External pause | `Poller.pause()` | Calls `pause(assignedPartitions)` on all currently assigned partitions. Throws `PollerNotRunning` if not started |
-| 3 | External resume | `Poller.resume()` | Calls `resume(assignedPartitions)` on all currently assigned partitions. Throws `PollerNotRunning` if not started |
-| 4 | Graceful shutdown | `shutdown` Mono emits | `takeUntilOther` completes the Flux, subscriber completion handler fires `done` signal |
-| 5 | Poll error | `poll.poll()` throws | `withRetries` (infinite, fixed 3s delay) retries the Mono before it reaches the pipeline |
-| 6 | Pipeline error | Downstream operator throws | `retryWhen` with exponential backoff (500ms initial, 30s max, infinite attempts) re-subscribes the chain |
-| 7 | stop() after completion | Consumer calls `stop()` | Fires internal `shutdownSink`, awaits `done` signal, then disposes subscription and scheduler. Idempotent — if already stopped, returns `Mono.empty()` immediately |
-| 8 | Double start | `start()` while running | Throws `PollerAlreadyRunning` |
+```kotlin
+// Typed callback (inline reified)
+consumer.onEvent<ConsumerEvent.Assigned> { event ->
+    println("Assigned: ${event.partitions}")
+}
 
-#### Thread Safety
+// All events
+consumer.onEvent { event ->
+    when (event) {
+        is ConsumerEvent.Assigned  -> metrics.partitionsAssigned(event.partitions.size)
+        is ConsumerEvent.Committed -> metrics.offsetsCommitted(event.offsets)
+        is ConsumerEvent.Stopped   -> log.info("Consumer stopped")
+        else                       -> {}
+    }
+}
+```
 
-- `running` flag uses `AtomicBoolean` — `start()`/`stop()` are safe to call from different threads
-- `stop()` fires `shutdownSink`, awaits `done` via `done.asMono()`, then disposes subscription and scheduler in `doFinally` — safe to call after pipeline completion (returns `Mono.empty()` if already stopped)
-- `pause()`/`resume()` check `running` before calling the SAM operation — the SAM operation itself is not thread-safe, but it runs on the caller's thread, and the underlying Kafka client serialises access via its own single-thread scheduler
-- `disposable` is always non-null — default `Disposable { }` before `start()` sets the real one
-
-### Committer
-
-The Committer (`BufferedCommitter`) owns the committed offsets state and runs a buffered commit pipeline on its own scheduler thread.
-
-- Accepts positions via `markProcessed(position)` — updates `processedOffsets` atomically and feeds an internal `Sinks.Many<Position>`
-- Batches positions with `bufferTimeout(25, 1s)` and commits the highest offset per partition
-- Filters out unassigned partitions before committing (avoids committing offsets for partitions the consumer no longer owns)
-- `seedOffsets(offsets)` pre-populates offsets without going through the position pipeline (catch-up completion)
-- Exposes `positions: Flux<Position>` for external subscribers (completion detection)
-- `stop(): Mono<Void>` fires `tryEmitComplete()` on the internal sink, awaits pipeline drain, then disposes the scheduler
-- Retries commits indefinitely on transient failures; the outer `retryWhen` restarts the pipeline on unexpected errors
-- Owns `processedOffsets` state — no longer managed by `StreamingConsumer`
+---
 
 ## Producer
 
-Create a producer with `Prozess.producer()`. Each instance is bound to a single topic via `ProducerConfig`.
+### Unkeyed (round-robin partitioning)
 
 ```kotlin
-val producer = Prozess.producer<MyEvent>(
-    config = ProducerConfig(bootstrapServers = "localhost:9092", topic = Topic("events")),
-    serializer = { event -> Json.encodeToByteArray(event) },
+val producer = Prozess.producer(
+    config     = ProducerConfig("localhost:9092", Topic("events")),
+    serializer = { it.toByteArray() },
+)
+
+producer.send("hello")
+producer.sendAll(listOf("a", "b", "c"))
+producer.close()
+```
+
+### Keyed (per-key ordering)
+
+`sendAll` groups records by the extracted key and sends each key group sequentially, guaranteeing per-key ordering.
+
+```kotlin
+val producer = Prozess.producer(
+    config        = ProducerConfig("localhost:9092", Topic("orders")),
+    keyExtractor  = { order: Order -> order.customerId },
+    keySerializer = { it.toByteArray() },
+    serializer    = { Json.encode(it).toByteArray() },
+)
+
+producer.sendAll(orders)
+producer.close()
+```
+
+### Headers, partitions, timestamps
+
+```kotlin
+val producer = Prozess.producer(
+    config             = ProducerConfig("localhost:9092", Topic("events")),
+    serializer         = { it.toByteArray() },
+    headerEnricher     = { listOf(Header("trace-id", traceId().toByteArray())) },
+    partitionExtractor = { event -> event.shardId % numPartitions },
+    timestampExtractor = { event -> event.occurredAt.toEpochMilliseconds() },
 )
 ```
-
-### Sending messages
-
-**Single message** — blocks until the broker acknowledges and returns the written offset:
-
-```kotlin
-val offset: Long = producer.send(key = event.id, value = event)
-```
-
-**Batch — collection** — sends all messages and blocks until all are acknowledged. Returns the
-sent messages as a list (pass-through):
-
-```kotlin
-val sent: List<MyEvent> = producer.sendAll(events, key = { it.id })
-```
-
-**Batch — vararg** — convenience overload for ad-hoc sends:
-
-```kotlin
-producer.sendAll(eventA, eventB, eventC, key = { it.id })
-```
-
-Both `sendAll` overloads accept an optional `headersProvider` to attach per-message Kafka headers:
-
-```kotlin
-producer.sendAll(events, key = { it.id }, headersProvider = { listOf(Header("trace-id", traceId.toByteArray())) })
-```
-
-Messages are grouped by extracted key and sent in order within each key group, preserving
-per-key ordering. The underlying `StreamingProducer.sendAll()` is available for reactive
-pipelines that already work with `Many<M>`.
-
-> **Failure behaviour:** if any message fails to send, `sendAll` throws `SendFailure` immediately.
-> Messages already acknowledged before the failure are not returned and cannot be identified from
-> the exception — treat the batch as all-or-nothing or handle partial delivery at the call site.
 
 ### Transactions
 
 ```kotlin
+val config = ProducerConfig(
+    bootstrapServers = "localhost:9092",
+    topic            = Topic("results"),
+    transactional    = TransactionalConfig.Enabled("my-app-producer-1"),
+)
+
+val producer = Prozess.producer(config, { it.toByteArray() })
+
 producer.initTransactions()
 producer.beginTransaction()
 try {
-    producer.send("k", event)
+    producer.sendAll(results)
+    producer.sendOffsetsToTransaction(processedOffsets, groupMember)
     producer.commitTransaction()
 } catch (e: Exception) {
     producer.abortTransaction()
@@ -224,15 +316,134 @@ try {
 producer.close()
 ```
 
-Configure with `TransactionalConfig.Enabled(id = "my-transactional-id")` in `ProducerConfig`.
-Transactional producers use `acks=all` automatically.
+---
 
-### Multiple topics
+## Security
 
-`ProducerConfig` is a `data class` — copy it to create producers for different topics without
-duplicating connection settings:
+### TLS
 
 ```kotlin
-val base = ProducerConfig(bootstrapServers = "localhost:9092", topic = Topic("events"))
-val dlqProducer = Prozess.producer<MyEvent>(base.copy(topic = Topic("events-dlq")), serializer)
+val ssl = SecurityProtocol.Ssl(
+    truststore = TruststoreConfig(
+        location = "/etc/kafka/truststore.jks",
+        password = "changeit",
+    ),
+)
+
+ConsumerConfig(bootstrapServers, groupId, topics, security = ssl)
 ```
+
+### Mutual TLS
+
+```kotlin
+val mTls = SecurityProtocol.Ssl(
+    truststore = TruststoreConfig("/etc/kafka/truststore.jks", "changeit"),
+    keystore   = KeystoreConfig("/etc/kafka/keystore.jks", "changeit"),
+)
+```
+
+### SASL/PLAIN over TLS
+
+```kotlin
+val sasl = SecurityProtocol.SaslSsl(
+    mechanism = SaslMechanism.Plain(username = "alice", password = "secret"),
+)
+```
+
+### SCRAM-SHA-512
+
+```kotlin
+val scram = SecurityProtocol.SaslSsl(
+    mechanism = SaslMechanism.Scram(
+        algorithm = SaslMechanism.Scram.Algorithm.Sha512,
+        username  = "alice",
+        password  = "secret",
+    ),
+)
+```
+
+### OAuth 2.0
+
+```kotlin
+val oauth = SecurityProtocol.SaslSsl(
+    mechanism = SaslMechanism.OAuthBearer(
+        tokenEndpointUrl = "https://auth.example.com/token",
+        clientId         = "my-app",
+        clientSecret     = "secret",
+        scope            = "kafka",
+    ),
+)
+```
+
+### Kerberos (GSSAPI)
+
+```kotlin
+val kerberos = SecurityProtocol.SaslSsl(
+    mechanism = SaslMechanism.Kerberos(
+        serviceName = "kafka",
+        jaasConfig  = "com.sun.security.auth.module.Krb5LoginModule required ...",
+    ),
+)
+```
+
+---
+
+## Deserializer contract
+
+`Prozess.Deserializer<M>` receives the full raw `Received<ByteArray>` and returns a `DeserializationResult`:
+
+| Result | Meaning |
+|---|---|
+| `DeserializationResult.Message(value)` | Normal record — handler is called with the deserialized value |
+| `DeserializationResult.Tombstone` | Null-value Kafka delete marker — logged at INFO, acknowledged, handler skipped |
+| `DeserializationResult.PoisonPill(reason)` | Unrecoverable bad record — logged at WARN, acknowledged, handler skipped |
+
+```kotlin
+val deserializer: Prozess.Deserializer<Order> = { received ->
+    when (val msg = received.message) {
+        is ReceivedMessage.Tombstone -> DeserializationResult.Tombstone
+        is ReceivedMessage.Data      -> runCatching { Json.decode<Order>(msg.bytes) }
+            .fold(
+                onSuccess = { DeserializationResult.Message(it) },
+                onFailure = { DeserializationResult.PoisonPill("invalid JSON: ${it.message}") },
+            )
+    }
+}
+```
+
+---
+
+## Error handling
+
+All library-originated errors are subtypes of `ProzessException`:
+
+| Exception | When |
+|---|---|
+| `ConsumerNotActive` | `position()` or `lag()` called after shutdown |
+| `PollerAlreadyRunning` | `Poller.start()` called twice |
+| `PollerNotRunning` | `pause()`/`resume()` called when not running |
+| `CommitterAlreadyRunning` | `Committer.start()` called twice |
+| `CommitFailure` | Offset commit failed |
+| `RetryExhausted` | Generic retry exhaustion |
+| `SendFailure` | Producer send failed |
+| `TimeoutExpired` | Kafka operation timed out |
+| `AuthenticationFailure` | SASL auth or ACL rejection |
+| `SerializationFailure` | Kafka serialization error |
+
+```kotlin
+try {
+    producer.send(value)
+} catch (e: ProzessException) {
+    when (e) {
+        is SendFailure         -> log.error("Send failed", e)
+        is AuthenticationFailure -> alerting.fire("Auth failure", e)
+        else                   -> metrics.increment("producer.errors")
+    }
+}
+```
+
+---
+
+## Performance
+
+See [BENCHMARKS.md](BENCHMARKS.md) for a full comparison against raw `kafka-clients`, Spring Kafka, and Vert.x Kafka covering throughput, concurrent handler execution, grouped/ordered processing, and memory pressure under backpressure.

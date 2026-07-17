@@ -14,9 +14,11 @@ import se.oyabun.prozess.Prozess.DeserializationResult
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.seconds
+import kotlin.time.Instant
 
 @Tag("integration")
 @TestInstance(Lifecycle.PER_CLASS)
@@ -769,4 +771,251 @@ class KafkaTests {
         messageDeserializer = { String(it) },
         process = process,
     )
+
+    @Nested
+    inner class ProcessingModeTest {
+
+        @Test
+        fun `batch mode commits offsets and does not replay on restart`() {
+            val topicName = topic(bootstrapServers)
+            val groupId = groupId()
+            val count = 20
+            val published = publish(bootstrapServers, topicName, count = count)
+
+            val received = ConcurrentLinkedQueue<String>()
+            val latch = CountDownLatch(count)
+            val consumer = Prozess.consumer(
+                config = ConsumerConfig(bootstrapServers, groupId, setOf(topicName)),
+                deserializer = { r ->
+                    when (val msg = r.message) {
+                        is ReceivedMessage.Data -> DeserializationResult.Message(String(msg.bytes))
+                        is ReceivedMessage.Tombstone -> DeserializationResult.Tombstone
+                    }
+                },
+            ).batch(size = 5) { batch ->
+                batch.forEach { received.add(it.value); latch.countDown() }
+            }
+            consumer.start(from = StartOffset.Earliest)
+            assertTrue(latch.await(5, TimeUnit.SECONDS), "timed out, got ${received.size}")
+            consumer.shutdown()
+            assertEquals(published.sorted(), received.sorted().toList())
+
+            val replayLatch = CountDownLatch(1)
+            val replayConsumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, _, _ ->
+                replayLatch.countDown()
+            }
+            replayConsumer.start(from = StartOffset.Earliest)
+            val replayed = replayLatch.await(3, TimeUnit.SECONDS)
+            replayConsumer.shutdown()
+            assertTrue(!replayed, "batch mode must commit offsets — no replay expected")
+        }
+
+        @Test
+        fun `groupBy each commits offsets and does not replay on restart`() {
+            val topicName = topic(bootstrapServers)
+            val groupId = groupId()
+            val count = 15
+            val published = publish(bootstrapServers, topicName, count = count)
+
+            val received = ConcurrentLinkedQueue<String>()
+            val latch = CountDownLatch(count)
+            val consumer = Prozess.consumer(
+                config = ConsumerConfig(bootstrapServers, groupId, setOf(topicName)),
+                deserializer = { r ->
+                    when (val msg = r.message) {
+                        is ReceivedMessage.Data -> DeserializationResult.Message(String(msg.bytes))
+                        is ReceivedMessage.Tombstone -> DeserializationResult.Tombstone
+                    }
+                },
+            ).groupBy { p -> p.value.take(4) }
+             .each { _, p -> received.add(p.value); latch.countDown() }
+            consumer.start(from = StartOffset.Earliest)
+            assertTrue(latch.await(5, TimeUnit.SECONDS), "timed out, got ${received.size}")
+            consumer.shutdown()
+            assertEquals(published.sorted(), received.sorted().toList())
+
+            val replayLatch = CountDownLatch(1)
+            val replayConsumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, _, _ ->
+                replayLatch.countDown()
+            }
+            replayConsumer.start(from = StartOffset.Earliest)
+            val replayed = replayLatch.await(3, TimeUnit.SECONDS)
+            replayConsumer.shutdown()
+            assertTrue(!replayed, "groupBy each must commit offsets — no replay expected")
+        }
+
+        @Test
+        fun `consumer with key deserializer receives Key Present with correct value`() {
+            val topicName = topic(bootstrapServers)
+            val groupId = groupId()
+
+            val producer = Prozess.producer<String, String>(
+                config = ProducerConfig(bootstrapServers, Topic(topicName)),
+                keyExtractor = { it },
+                keySerializer = { it.toByteArray() },
+                serializer = { it.toByteArray() },
+            )
+            producer.send("hello")
+            producer.close()
+
+            val receivedKeys = mutableListOf<Key<String>>()
+            val latch = CountDownLatch(1)
+            val consumer = Prozess.consumer(
+                config = ConsumerConfig(bootstrapServers, groupId, setOf(topicName)),
+                keyDeserializer = { String(it) },
+                messageDeserializer = { String(it) },
+                process = { _, key, _ -> receivedKeys.add(key); latch.countDown() },
+            )
+            consumer.start(from = StartOffset.Earliest)
+            assertTrue(latch.await(5, TimeUnit.SECONDS), "timed out waiting for keyed message")
+            consumer.shutdown()
+
+            assertEquals(1, receivedKeys.size)
+            val key = receivedKeys[0]
+            assertTrue(key is Key.Present, "key must be Key.Present, got $key")
+            assertEquals("hello", (key as Key.Present<String>).value)
+        }
+    }
+
+    @Nested
+    inner class CatchUpEdgeCasesTest {
+
+        @Test
+        fun `catchup on empty topic completes immediately without processing any records`() {
+            val topicName = topic(bootstrapServers)
+            val groupId = groupId()
+
+            val processed = AtomicInteger(0)
+            val consumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, _, _ ->
+                processed.incrementAndGet()
+            }
+            val stopped = onStopped(consumer)
+            consumer.start(from = StartOffset.Earliest, until = EndOffset.CatchUp)
+            assertTrue(stopped.await(5, TimeUnit.SECONDS), "consumer must self-terminate on empty topic with CatchUp")
+            assertEquals(0, processed.get(), "no records should be processed on an empty topic")
+        }
+
+        @Test
+        fun `atTimestamp with no matching records seeks to end and receives nothing`() {
+            val topicName = topic(bootstrapServers)
+            val groupId = groupId()
+            val pastMessages = listOf("old-1", "old-2", "old-3")
+            publishAt(bootstrapServers, topicName, pastMessages, timestamp = System.currentTimeMillis() - 60_000)
+
+            val futureTimestamp = Instant.fromEpochMilliseconds(System.currentTimeMillis() + 3_600_000)
+            val received = ConcurrentLinkedQueue<String>()
+            val consumer = stringConsumer(ConsumerConfig(bootstrapServers, groupId, setOf(topicName))) { _, _, msg ->
+                received.add(msg)
+            }
+            val assigned = onAssigned(consumer)
+            consumer.start(from = StartOffset.AtTimestamp(futureTimestamp))
+            awaitLatch(assigned)
+            Thread.sleep(1000)
+            consumer.shutdown()
+            assertTrue(received.isEmpty(), "no messages should be received when timestamp is in the future, got: $received")
+        }
+    }
+
+    @Nested
+    inner class LagTest {
+
+        @Test
+        fun `lag decreases as messages are consumed`() {
+            val topicName = topic(bootstrapServers, partitions = 1)
+            val groupId = groupId()
+            val count = 20
+            publish(bootstrapServers, topicName, count = count)
+
+            val partition = Partition(0, Topic(topicName))
+            val processedLatch = CountDownLatch(count)
+            val firstProcessed = CountDownLatch(1)
+            val consumer = StreamingConsumer(
+                config = ConsumerConfig(bootstrapServers, groupId, setOf(topicName)),
+                processor = DefaultProcessor.each<Nothing, String>(
+                    deserializer = { r ->
+                        when (val msg = r.message) {
+                            is ReceivedMessage.Data -> DeserializationResult.Message(String(msg.bytes))
+                            is ReceivedMessage.Tombstone -> DeserializationResult.Tombstone
+                        }
+                    },
+                    handler = { firstProcessed.countDown(); processedLatch.countDown() },
+                ),
+            )
+            consumer.start(from = StartOffset.Earliest)
+
+            // Wait until at least one record is processed — position is now set
+            assertTrue(firstProcessed.await(5, TimeUnit.SECONDS), "timed out waiting for first record")
+            val lagMidway = consumer.lag(partition)
+            assertTrue(lagMidway >= 0, "lag must be non-negative, got $lagMidway")
+
+            // Wait for all records to be processed and committed
+            assertTrue(processedLatch.await(5, TimeUnit.SECONDS), "timed out processing all records")
+            Thread.sleep(300) // allow commit to flush
+            val lagAfter = consumer.lag(partition)
+            assertEquals(0L, lagAfter, "lag must be 0 after all messages processed and committed")
+            consumer.shutdown()
+        }
+    }
+
+    @Nested
+    inner class ExactlyOnceTest {
+
+        @Test
+        fun `sendOffsetsToTransaction completes without error and output is committed`() {
+            val inputTopic = topic(bootstrapServers)
+            val outputTopic = topic(bootstrapServers)
+            val groupId = groupId()
+            val txId = "test-eos-${groupId.take(8)}"
+            val messages = listOf("a", "b", "c")
+            publishAt(bootstrapServers, inputTopic, messages)
+
+            val producer = Prozess.producer<String>(
+                config = ProducerConfig(
+                    bootstrapServers = bootstrapServers,
+                    topic = Topic(outputTopic),
+                    transactional = TransactionalConfig.Enabled(txId),
+                ),
+                serializer = { it.toByteArray() },
+            )
+            producer.initTransactions()
+
+            // Consume input and produce transactionally to output
+            val processedLatch = CountDownLatch(messages.size)
+            val consumer = stringConsumer(
+                ConsumerConfig(bootstrapServers, groupId, setOf(inputTopic)),
+            ) { _, _, msg ->
+                producer.beginTransaction()
+                producer.send("transformed-$msg")
+                // sendOffsetsToTransaction with a stub GroupMember — verifies the API path completes
+                // without error (Kafka accepts syntactically valid calls even if generationId is stale)
+                producer.sendOffsetsToTransaction(
+                    emptyMap(),
+                    GroupMember(groupId = groupId, generationId = -1, memberId = ""),
+                )
+                producer.commitTransaction()
+                processedLatch.countDown()
+            }
+            consumer.start(from = StartOffset.Earliest)
+            assertTrue(processedLatch.await(10, TimeUnit.SECONDS), "timed out processing input messages")
+            consumer.shutdown()
+            producer.close()
+
+            // All transformed messages must be visible under read_committed
+            val outputReceived = ConcurrentLinkedQueue<String>()
+            val outputLatch = CountDownLatch(messages.size)
+            val outputConsumer = stringConsumer(
+                ConsumerConfig(
+                    bootstrapServers = bootstrapServers,
+                    groupId = groupId(),
+                    topics = setOf(outputTopic),
+                    isolationLevel = ConsumerConfig.IsolationLevel.ReadCommitted,
+                ),
+            ) { _, _, msg -> outputReceived.add(msg); outputLatch.countDown() }
+            outputConsumer.start(from = StartOffset.Earliest)
+            assertTrue(outputLatch.await(5, TimeUnit.SECONDS), "timed out reading output topic")
+            outputConsumer.shutdown()
+
+            assertEquals(messages.map { "transformed-$it" }.sorted(), outputReceived.sorted().toList())
+        }
+    }
 }

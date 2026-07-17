@@ -2,7 +2,7 @@
 
 kotlin           = "2.4.0"
 jvm              = "21"
-aelv             = "1.0.0-rc.3"
+aelv             = "1.0.0-rc.5"
 coroutines       = "1.10.2"
 kafka_clients    = "3.9.2"
 slf4j            = "2.0.17"
