@@ -46,7 +46,7 @@ class ProcessorTest {
 
         Verify.that(processor.process(messages))
             .emitsNext(Position(p0, 0), Position(p0, 1), Position(p0, 2))
-            .completesNormally()
+            .completes()
     }
 
     @Test
@@ -88,7 +88,7 @@ class ProcessorTest {
         )
         Verify.that(processor.process(Many.items(received(p0, 0))))
             .emitsNext(Position(p0, 0))
-            .completesNormally()
+            .completes()
 
         assertEquals(3, attempts)
     }
@@ -114,7 +114,7 @@ class ProcessorTest {
 
         Verify.that(processor.process(messages))
             .emitsNext(Position(p0, 0), Position(p0, 1), Position(p0, 2), Position(p0, 3), Position(p0, 4))
-            .completesNormally()
+            .completes()
     }
 
     @Test
@@ -158,7 +158,7 @@ class ProcessorTest {
 
         Verify.that(processor.process(messages))
             .emitsNext(Position(p0, 0))
-            .completesNormally()
+            .completes()
 
         assertEquals(1, batches.size)
         assertEquals(listOf("a"), batches[0])
@@ -185,7 +185,7 @@ class ProcessorTest {
         )
         Verify.that(processor.process(Many.items(received(p0, 0, "a"), received(p0, 1, "b"))))
             .emitsNext(Position(p0, 0), Position(p0, 1))
-            .completesNormally()
+            .completes()
         assertEquals(2, attempts)
     }
 
@@ -295,7 +295,7 @@ class ProcessorTest {
             received(p0, 3, "b"),
         )
 
-        val lastPosition = runBlocking { processor.process(messages).last().rightOrNull() }
+        val lastPosition = runBlocking { processor.process(messages).last().await().rightOrNull() }
 
         assertEquals(Position(p0, 3), lastPosition)
     }
@@ -320,7 +320,7 @@ class ProcessorTest {
         )
         Verify.that(processor.process(Many.items(received(p0, 0, "a"))))
             .emitsCount(1)
-            .completesNormally()
+            .completes()
         assertEquals(2, attempts)
     }
 
@@ -374,7 +374,7 @@ class ProcessorTest {
             received(p0, 3, "b"),
         )
 
-        val lastPosition = runBlocking { processor.process(messages).last().rightOrNull() }
+        val lastPosition = runBlocking { processor.process(messages).last().await().rightOrNull() }
 
         assertEquals(Position(p0, 3), lastPosition)
     }
@@ -397,7 +397,7 @@ class ProcessorTest {
         )
         Verify.that(processor.process(Many.items(received(p0, 0, "a"))))
             .emitsNext(Position(p0, 0))
-            .completesNormally()
+            .completes()
         assertEquals(1, batches.size)
         assertEquals(listOf("a"), batches[0])
     }
@@ -420,7 +420,7 @@ class ProcessorTest {
         )
         Verify.that(processor.process(Many.items(received(p0, 0))))
             .emitsNext(Position(p0, 0))
-            .completesNormally()
+            .completes()
         assertEquals(2, attempts)
     }
 
@@ -443,7 +443,7 @@ class ProcessorTest {
         )
         Verify.that(processor.process(Many.items(received(p0, 0, "a"))))
             .emitsCount(1)
-            .completesNormally()
+            .completes()
         assertEquals(2, attempts, "deserialization is retried inside retry scope")
     }
 
@@ -460,7 +460,7 @@ class ProcessorTest {
             handler = {},
         )
         Verify.that(processor.process(Many.empty()))
-            .completesNormally()
+            .completes()
     }
 
     @Test
@@ -478,7 +478,7 @@ class ProcessorTest {
             batchDuration = 10.seconds,
         )
         Verify.that(processor.process(Many.empty()))
-            .completesNormally()
+            .completes()
     }
 
     @Test
@@ -495,7 +495,7 @@ class ProcessorTest {
             handler = { _, _ -> },
         )
         Verify.that(processor.process(Many.empty()))
-            .completesNormally()
+            .completes()
     }
 
     @Test
@@ -513,7 +513,7 @@ class ProcessorTest {
         )
         Verify.that(processor.process(Many.items(received(p0, 0), received(p0, 1))))
             .emitsNext(Position(p0, 0), Position(p0, 1))
-            .completesNormally()
+            .completes()
     }
 
     @Test
@@ -526,7 +526,7 @@ class ProcessorTest {
         )
         Verify.that(processor.process(Many.items(received(p0, 0))))
             .emitsNext(Position(p0, 0))
-            .completesNormally()
+            .completes()
         assertEquals(emptyList(), processed)
     }
 
@@ -540,7 +540,7 @@ class ProcessorTest {
         )
         Verify.that(processor.process(Many.items(received(p0, 0))))
             .emitsNext(Position(p0, 0))
-            .completesNormally()
+            .completes()
         assertEquals(emptyList(), processed)
     }
 
@@ -569,7 +569,7 @@ class ProcessorTest {
             received(p0, 3, "d"),
         )))
             .emitsNext(Position(p0, 0), Position(p0, 1), Position(p0, 2), Position(p0, 3))
-            .completesNormally()
+            .completes()
     }
 
     @Test
@@ -617,7 +617,7 @@ class ProcessorTest {
             received(p0, 0), received(p0, 1), received(p0, 2), received(p0, 3),
         )))
             .emitsNext(Position(p0, 0), Position(p0, 1), Position(p0, 2), Position(p0, 3))
-            .completesNormally()
+            .completes()
         assertTrue(!handlerCalled, "handler must not be called when all records are skipped")
     }
 
@@ -676,7 +676,7 @@ class ProcessorTest {
         )
         Verify.that(processor.process(Many.items(received(p0, 0, "a"), received(p0, 1, "b"))))
             .emitsNext(Position(p0, 0), Position(p0, 1))
-            .completesNormally()
+            .completes()
         assertTrue(attempts >= 3, "handler must be retried at least 3 times, was: $attempts")
     }
 

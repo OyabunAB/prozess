@@ -6,7 +6,6 @@ import se.oyabun.aelv.merge
 import se.oyabun.aelv.take
 import se.oyabun.aelv.Many
 import se.oyabun.aelv.None
-import se.oyabun.aelv.toMany
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.assertThrows
@@ -64,16 +63,15 @@ class CommitterTest {
             maxBatchTime = 5.seconds,
         )
         c.start()
-        val committed = runBlocking {
+        val driver = None.defer<Offsets> {
             c.markProcessed(Position(p0, 1L))
             c.markProcessed(Position(p0, 2L))
             c.markProcessed(Position(p0, 3L))
-            val offsets = c.committedOffsets.first()
-            c.stop().await()
-            offsets
-        }
-        assertTrue(committed.isRight(), "Expected a committed offsets event")
-        assertEquals(mapOf(p0 to 4L), committed.rightOrNull())
+        }.toMany()
+        Verify.that(merge(c.committedOffsets.take(1), driver))
+            .assertNext { assertEquals(mapOf(p0 to 4L), it) }
+            .completes()
+        runBlocking { c.stop().await() }
     }
 
     @Test
@@ -173,8 +171,8 @@ class CommitterTest {
         }.toMany()
         Verify.that(merge(c.positions.take(2), driver))
             .emitsNext(Position(p0, 5L), Position(p1, 10L))
-            .thenCancels()
-            .verify()
+            .completes()
+            
     }
 
     @Test

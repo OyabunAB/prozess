@@ -12,7 +12,6 @@ import se.oyabun.aelv.take
 import se.oyabun.aelv.Verify
 import se.oyabun.aelv.None
 import se.oyabun.aelv.merge
-import se.oyabun.aelv.toMany
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -60,7 +59,7 @@ class ReceivedBufferTest {
             buffer.offer(r2)
         }
         Verify.that(buffer.asMany().take(2))
-            .emitsNext(r1, r2).completesNormally()
+            .emitsNext(r1, r2).completes()
     }
 
     @Test
@@ -70,7 +69,7 @@ class ReceivedBufferTest {
         val record = Received(Key.Present("k".toByteArray()), ReceivedMessage.Data("v".toByteArray()), Position(p, 0))
         Verify.that(merge(buffer.asMany().take(1), None.defer<Received<ByteArray>> { buffer.offer(record) }.toMany()))
             .emitsNext(record)
-            .completesNormally()
+            .completes()
     }
 
 
@@ -81,10 +80,10 @@ class ReceivedBufferTest {
         val a = Received(Key.Present("a".toByteArray()), ReceivedMessage.Data("a".toByteArray()), Position(p, 0))
         val b = Received(Key.Present("b".toByteArray()), ReceivedMessage.Data("b".toByteArray()), Position(p, 1))
         Verify.that(merge(buffer.asMany().take(2), None.defer<Received<ByteArray>> { buffer.offer(a); buffer.offer(b) }.toMany()))
-            .emitsNext(a, b).completesNormally()
+            .emitsNext(a, b).completes()
         val c = Received(Key.Present("c".toByteArray()), ReceivedMessage.Data("c".toByteArray()), Position(p, 2))
         Verify.that(merge(buffer.asMany().take(1), None.defer<Received<ByteArray>> { buffer.offer(c) }.toMany()))
-            .emitsNext(c).completesNormally()
+            .emitsNext(c).completes()
     }
 
     @Test
@@ -97,7 +96,7 @@ class ReceivedBufferTest {
         }
         assertEquals(count, buffer.size)
         Verify.that(buffer.asMany().take(count.toLong()))
-            .emitsCount(count.toLong()).completesNormally()
+            .emitsCount(count.toLong()).completes()
         assertEquals(0, buffer.size)
     }
 

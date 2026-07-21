@@ -22,16 +22,12 @@ import se.oyabun.aelv.One
 import se.oyabun.aelv.Policy
 import se.oyabun.aelv.Sinks
 import se.oyabun.aelv.concatMap
-import se.oyabun.aelv.delaySubscription
-import se.oyabun.aelv.doOnError
-import se.oyabun.aelv.doOnSubscribe
 import se.oyabun.aelv.drain
 import se.oyabun.aelv.filter
 import se.oyabun.aelv.flatMap
 import se.oyabun.aelv.flatMapMany
 import se.oyabun.aelv.map
 import se.oyabun.aelv.merge
-import se.oyabun.aelv.retry
 import se.oyabun.aelv.take
 import se.oyabun.aelv.takeUntilOther
 import se.oyabun.aelv.await

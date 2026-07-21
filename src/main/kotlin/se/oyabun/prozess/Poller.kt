@@ -26,11 +26,10 @@ import kotlinx.coroutines.runBlocking
 import se.oyabun.aelv.Failure
 import se.oyabun.aelv.None
 import se.oyabun.aelv.Policy
-import se.oyabun.aelv.Sink
+import se.oyabun.aelv.BroadcastSink
 import se.oyabun.aelv.Success
 import se.oyabun.aelv.await
 import se.oyabun.aelv.first
-import se.oyabun.aelv.retry
 import se.oyabun.aelv.takeUntilOther
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -86,8 +85,8 @@ internal class BufferedPoller(
     private val assignments: () -> Partitions,
     private val instanceId: String,
     private val pollInterval: Duration,
-    private val shutdownSink: Sink<Unit>,
-    private val doneSink: Sink<Unit>,
+    private val shutdownSink: BroadcastSink<Unit>,
+    private val doneSink: BroadcastSink<Unit>,
     private val log: Logger,
 ) : Poller {
 
@@ -116,7 +115,7 @@ internal class BufferedPoller(
             signalCompletion()
         })
         scope.launch {
-            shutdownSink.asMany().first()
+            shutdownSink.asMany().first().await()
             running.set(false)
             job.get().cancelAndJoin()
             signalCompletion()

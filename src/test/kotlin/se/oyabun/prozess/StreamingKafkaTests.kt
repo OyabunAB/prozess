@@ -41,8 +41,8 @@ class StreamingKafkaTests {
             val messages = (1..10).map { "msg-$it" }
             Verify.that(producer.sendAll(Many.from(messages)).toList())
                 .assertNext { assertEquals(messages.sorted(), it.sorted()) }
-                .completesNormally()
-            Verify.that(producer.close()).completesNormally()
+                .completes()
+            Verify.that(producer.close()).completes()
         }
 
         @Test
@@ -57,8 +57,8 @@ class StreamingKafkaTests {
                 serializer = { it.toByteArray() },
             )
             val payload = "hello"
-            Verify.that(producer.sendAll(Many.items(payload))).completesNormally()
-            Verify.that(producer.close()).completesNormally()
+            Verify.that(producer.sendAll(Many.items(payload))).completes()
+            Verify.that(producer.close()).completes()
 
             val receivedHeaders = mutableListOf<Headers>()
             val latch = java.util.concurrent.CountDownLatch(1)

@@ -19,7 +19,7 @@ import kotlinx.coroutines.runBlocking
 import se.oyabun.aelv.Either
 import se.oyabun.aelv.Failure
 import se.oyabun.aelv.None
-import se.oyabun.aelv.Sink
+import se.oyabun.aelv.BroadcastSink
 import se.oyabun.aelv.await
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
@@ -54,7 +54,7 @@ interface ShutdownableClient {
  */
 class ShutdownCoordinator(
     private val client: ShutdownableClient,
-    private val closeSignal: Sink<Unit>,
+    private val closeSignal: BroadcastSink<Unit>,
     private val poller: Poller,
     private val committer: Committer,
     private val instanceId: String,

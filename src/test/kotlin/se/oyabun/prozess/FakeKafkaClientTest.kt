@@ -36,10 +36,10 @@ class FakeKafkaClientTest {
 
         Verify.that(client.poll(100.milliseconds))
             .emitsNext(listOf(r1))
-            .completesNormally()
+            .completes()
         Verify.that(client.poll(100.milliseconds))
             .emitsNext(listOf(r2))
-            .completesNormally()
+            .completes()
     }
 
     @Test
@@ -48,7 +48,7 @@ class FakeKafkaClientTest {
 
         Verify.that(client.poll(100.milliseconds))
             .emitsNext(emptyList<Received<ByteArray>>())
-            .completesNormally()
+            .completes()
     }
 
     @Test
