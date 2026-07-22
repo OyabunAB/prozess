@@ -9,7 +9,7 @@ plugins {
     alias(libs.plugins.jmh)
 }
 
-version = System.getenv("VERSION") ?: "0.0.0-SNAPSHOT"
+version = System.getenv("VERSION") ?: "1.0.0-SNAPSHOT"
 
 repositories {
     mavenCentral()

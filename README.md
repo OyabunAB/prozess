@@ -6,10 +6,22 @@ Reactive Kafka consumer/producer library for Kotlin, built on [aelv](https://git
 
 ```kotlin
 // Gradle (libs.versions.toml)
-prozess = "1.0.0-rc.5"
+prozess = "1.0.0-rc.2"
 
 // build.gradle.kts
-implementation("se.oyabun:prozess:1.0.0-rc.5")
+implementation("se.oyabun:prozess:1.0.0-rc.2")
+```
+
+RC releases are available from GitHub Packages. Add the repository:
+
+```kotlin
+maven {
+    url = uri("https://maven.pkg.github.com/OyabunAB/prozess")
+    credentials {
+        username = providers.gradleProperty("gpr.user").orNull ?: System.getenv("GITHUB_ACTOR")
+        password = providers.gradleProperty("gpr.token").orNull ?: System.getenv("GITHUB_TOKEN")
+    }
+}
 ```
 
 Requires Kotlin 2.4+ and JVM 21+.
