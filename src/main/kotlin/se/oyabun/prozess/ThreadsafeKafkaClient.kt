@@ -81,7 +81,8 @@ internal class ThreadsafeKafkaClient(config: ConsumerConfig) : KafkaClient {
 
     override fun endOffsetOf(partition: Partition): One<Long> =
         One.defer(dispatcher) {
-            delegate.endOffsets(listOf(partition.toApache()))[partition.toApache()]
+            val tp = partition.toApache()
+            delegate.endOffsets(listOf(tp))[tp]
                 ?: throw IllegalStateException("No end offset returned for $partition")
         }
 
