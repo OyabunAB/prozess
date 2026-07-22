@@ -19,12 +19,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.newSingleThreadContext
 import se.oyabun.aelv.Many
 import se.oyabun.aelv.None
-import se.oyabun.aelv.Policy
 import se.oyabun.aelv.Sinks
 import se.oyabun.aelv.asMany
 import se.oyabun.aelv.bufferTimeout
@@ -123,7 +123,7 @@ internal class BufferedCommitter(
 ) : Committer {
 
     private val processedOffsetsRef  = KAtomicReference<Offsets>(emptyMap())
-    private val positionSink         = Sinks.replay<Position>()
+    private val positionSink         = Sinks.broadcast<Position>()
     private val committedOffsetsSink = Sinks.replayLast<Offsets>(1)
     private val doneSink             = Sinks.broadcast<Unit>()
     private val running              = AtomicBoolean(false)
@@ -171,7 +171,6 @@ internal class BufferedCommitter(
                         .withRetries()
                         .flatMapMany { Many.empty<Unit>() }
                 }
-                .retry(Policy.retry().withBackoff(500.milliseconds, 30.seconds))
                 .drain({}, { signalCompletion(it) }, { signalCompletion() })
         })
     }
@@ -187,6 +186,7 @@ internal class BufferedCommitter(
     private fun signalCompletion(cause: Throwable? = null) {
         running.set(false)
         dispatcher.close()
+        scope.cancel()
         if (cause != null) log.kafka.terminatedUnexpectedly("$instanceId-committer", cause)
         else log.kafka.completed("$instanceId-committer")
         doneSink.complete()

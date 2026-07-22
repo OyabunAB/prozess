@@ -52,7 +52,7 @@ interface ShutdownableClient {
  * Stops the poller and committer in order, waits for each to drain, then closes the
  * Kafka client. If [timeout] is exceeded, wakes up the client and force-closes it.
  */
-class ShutdownCoordinator(
+internal class ShutdownCoordinator(
     private val client: ShutdownableClient,
     private val closeSignal: BroadcastSink<Unit>,
     private val poller: Poller,

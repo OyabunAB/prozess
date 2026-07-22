@@ -134,13 +134,13 @@ class PartitionManagerTest {
 
     @Test
     fun `onPartitionsAssigned seeds committer for past-end partitions`() {
-        val ends = AtomicReference<Positions>(setOf(Position(p0, 10L), Position(p1, 100L)))
+        val ends = AtomicReference<Offsets>(mapOf(p0 to 10L, p1 to 100L))
         val context = mockContext(onPosition = { p -> if (p == p0) 15L else 5L })
 
         val handler = handler(ends = ends)
         val seeds = handler.onPartitionsAssigned(context, setOf(p0, p1))
 
-        assertEquals(mapOf(p0 to 11L), seeds, "p0 is past end offset (15 > 10), should seed offset+1")
+        assertEquals(mapOf(p0 to 10L), seeds, "p0 is past end offset (15 >= 10), should seed end offset")
     }
 
     @Test
@@ -208,7 +208,7 @@ class PartitionManagerTest {
 
     @Test
     fun `onPartitionsAssigned does not seed when position below end offset`() {
-        val ends = AtomicReference<Positions>(setOf(Position(p0, 100L)))
+        val ends = AtomicReference<Offsets>(mapOf(p0 to 100L))
         val context = mockContext(onPosition = { 50L })
         val handler = handler(ends = ends)
         val seeds = handler.onPartitionsAssigned(context, setOf(p0))
@@ -322,7 +322,7 @@ class PartitionManagerTest {
 
     private fun handler(
         pendingSeeks: AtomicReference<Offsets> = AtomicReference(emptyMap()),
-        ends: AtomicReference<Positions> = AtomicReference(emptySet()),
+        ends: AtomicReference<Offsets> = AtomicReference(emptyMap()),
         paused: () -> Boolean = { false },
     ) = CoordinatingPartitionManager(
         pendingSeeks = pendingSeeks,

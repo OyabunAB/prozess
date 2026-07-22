@@ -3,6 +3,8 @@ package se.oyabun.prozess
 import se.oyabun.aelv.take
 import se.oyabun.aelv.Many
 import se.oyabun.aelv.None
+import se.oyabun.aelv.merge
+import se.oyabun.aelv.mergeWith
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.assertThrows
@@ -129,10 +131,12 @@ class CommitterTest {
     fun `positions emits marked positions`() {
         val c = committer()
         Verify.that(
-            c.positions.take(2).doOnSubscribe {
-                c.markProcessed(Position(p0, 5L))
-                c.markProcessed(Position(p1, 10L))
-            }
+            c.positions.take(2).mergeWith(
+                None.defer<Position> {
+                    c.markProcessed(Position(p0, 5L))
+                    c.markProcessed(Position(p1, 10L))
+                }.toMany().delaySubscription(10.milliseconds)
+            )
         )
             .emitsNext(Position(p0, 5L), Position(p1, 10L))
             .completes()

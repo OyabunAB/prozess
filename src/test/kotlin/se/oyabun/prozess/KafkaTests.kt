@@ -42,8 +42,8 @@ class KafkaTests {
             val groupId = groupId()
             val config = ConsumerConfig(bootstrapServers, groupId, setOf(topic(bootstrapServers)))
             val consumer = stringConsumer(config)
-            consumer.start()
-            assertThrows<IllegalStateException> { consumer.start() }
+            consumer.start(StartOffset.Latest)
+            assertThrows<IllegalStateException> { consumer.start(StartOffset.Latest) }
             consumer.shutdown()
         }
 
@@ -91,7 +91,7 @@ class KafkaTests {
             publish(bootstrapServers, topic, count = 5)
             val config = ConsumerConfig(bootstrapServers, groupId(), topic)
             val consumer = stringConsumer(config)
-            consumer.start()
+            consumer.start(StartOffset.Latest)
             consumer.shutdown()
             assertTrue(consumer.isDisposed)
         }
@@ -102,7 +102,7 @@ class KafkaTests {
             publish(bootstrapServers, topic, count = 3)
             val config = ConsumerConfig(bootstrapServers, groupId(), topic)
             val consumer = stringConsumer(config)
-            consumer.start()
+            consumer.start(StartOffset.Latest)
             consumer.shutdown()
             consumer.shutdown()
         }
@@ -112,7 +112,7 @@ class KafkaTests {
             val topic = topic(bootstrapServers)
             val config = ConsumerConfig(bootstrapServers, groupId(), setOf(topic))
             val consumer = stringConsumer(config)
-            consumer.start()
+            consumer.start(StartOffset.Latest)
             consumer.pause()
             consumer.pause()
             consumer.resume()

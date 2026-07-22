@@ -30,6 +30,8 @@ import se.oyabun.aelv.map
 import se.oyabun.aelv.mapNotNull
 import se.oyabun.aelv.toList
 import se.oyabun.prozess.Prozess.DeserializationResult
+import java.util.concurrent.ConcurrentSkipListSet
+import java.util.concurrent.atomic.AtomicLong
 import se.oyabun.prozess.Prozess.Deserializer
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
@@ -80,17 +82,25 @@ interface Processor<M : Any> {
 }
 
 internal class ContiguousOffsetTracker {
-    private val completed = java.util.concurrent.ConcurrentSkipListSet<Long>()
-    @Volatile private var watermark = 0L
+    private val completed = ConcurrentSkipListSet<Long>()
+    private val watermark = AtomicLong(Long.MIN_VALUE)
 
-    @Synchronized
+    fun seed(offset: Long) {
+        watermark.compareAndSet(Long.MIN_VALUE, offset)
+    }
+
     fun onCompleted(position: Position): Position? {
         val offset = position.offset
-        if (offset < watermark) return null
+        if (watermark.get() == Long.MIN_VALUE || offset < watermark.get()) return null
         completed.add(offset)
-        var advanced = false
-        while (completed.remove(watermark)) { watermark++; advanced = true }
-        return if (advanced) Position(position.partition, watermark - 1) else null
+        var last = -1L
+        var current = watermark.get()
+        while (completed.remove(current)) {
+            watermark.compareAndSet(current, current + 1)
+            last = current
+            current = watermark.get()
+        }
+        return if (last >= 0) Position(position.partition, last) else null
     }
 }
 
@@ -114,7 +124,7 @@ class DefaultProcessor<M : Any> private constructor(
     companion object {
 
         private fun retryPolicy(retryConfig: RetryConfig): Policy.Retry =
-            Policy.retry().withBackoff(retryConfig.minBackoff, retryConfig.maxBackoff).on { true }
+            Policy.retry().withBackoff(retryConfig.minBackoff, retryConfig.maxBackoff).on(::isTransient)
 
         /**
          * Processes each record individually.
@@ -236,7 +246,7 @@ class DefaultProcessor<M : Any> private constructor(
 
             fun partitionPipeline(partition: Many<Received<ByteArray>>): Many<Position> {
                 val tracker = ContiguousOffsetTracker()
-                return deserialize(log, keyMapper, deserializer, partition, policy)
+                return deserialize(log, keyMapper, deserializer, partition.doOnNext { tracker.seed(it.position.offset) }, policy)
                     .groupBy(
                         keySelector = { event: GroupedEvent<KafkaKey, M> ->
                             when (event) {
@@ -301,7 +311,7 @@ class DefaultProcessor<M : Any> private constructor(
 
             fun partitionPipeline(partition: Many<Received<ByteArray>>): Many<Position> {
                 val tracker = ContiguousOffsetTracker()
-                return deserialize(log, keyMapper, deserializer, partition, policy)
+                return deserialize(log, keyMapper, deserializer, partition.doOnNext { tracker.seed(it.position.offset) }, policy)
                     .groupBy(
                         keySelector = { event: GroupedEvent<KafkaKey, M> ->
                             when (event) {

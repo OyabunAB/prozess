@@ -157,14 +157,14 @@ object Prozess {
      * Create instances via the [Prozess.consumer] factory functions and builder chain.
      * Call [start] to begin consuming. Call [shutdown] to stop gracefully.
      */
-    interface Consumer<K, M : Any> {
-        /**
-         * Starts consuming from Kafka.
-         *
-         * @param from  offset reset strategy; defaults to [ConsumerConfig.startOffset].
-         * @param until controls when the consumer stops; defaults to [EndOffset.Continuous].
-         */
-        fun start(from: StartOffset = StartOffset.Latest, until: EndOffset = EndOffset.Continuous)
+     interface Consumer<K, M : Any> {
+         /**
+          * Starts consuming from Kafka.
+          *
+          * @param from  offset reset strategy; defaults to [ConsumerConfig.startOffset].
+          * @param until controls when the consumer stops; defaults to [EndOffset.Continuous].
+          */
+         fun start(from: StartOffset, until: EndOffset = EndOffset.Continuous)
 
         /** Initiates graceful shutdown: drains in-flight records, commits final offsets, closes the client. */
         fun shutdown()
@@ -247,6 +247,7 @@ object Prozess {
         object : Consumer<K, M> {
             private val delegate = StreamingConsumer(config, processor, instance)
             override fun start(from: StartOffset, until: EndOffset) = delegate.start(from, until)
+            fun start(until: EndOffset = EndOffset.Continuous)      = delegate.start(config.startOffset, until)
             override fun shutdown()                                  = delegate.shutdown()
             override val isDisposed: Boolean                         get() = delegate.isDisposed
             override fun pause()                                     = delegate.pause()

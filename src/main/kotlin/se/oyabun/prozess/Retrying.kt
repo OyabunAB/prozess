@@ -24,11 +24,18 @@ import kotlin.time.Duration.Companion.seconds
 
 internal val infiniteRetries: Long = Long.MAX_VALUE
 
+/** Returns true for exceptions that are worth retrying (transient). Permanent failures are not retried. */
+internal fun isTransient(t: Throwable): Boolean = when (t) {
+    is AuthenticationFailure -> false
+    is SerializationFailure  -> false
+    else                     -> true
+}
+
 internal fun retryPolicy(
     minBackoff: Duration = 500.milliseconds,
     maxBackoff: Duration = 30.seconds,
     maxAttempts: Long = infiniteRetries,
-    retryOn: (Throwable) -> Boolean = { true },
+    retryOn: (Throwable) -> Boolean = ::isTransient,
 ): Policy.Retry = Policy.retry()
     .on(retryOn)
     .withBackoff(minBackoff, maxBackoff)
@@ -38,12 +45,12 @@ internal fun <T : Any> One<T>.withRetries(
     minBackoff: Duration = 500.milliseconds,
     maxBackoff: Duration = 30.seconds,
     maxAttempts: Long = infiniteRetries,
-    retryOn: (Throwable) -> Boolean = { true },
+    retryOn: (Throwable) -> Boolean = ::isTransient,
 ): One<T> = retry(retryPolicy(minBackoff, maxBackoff, maxAttempts, retryOn))
 
 internal fun <T : Any> Many<T>.withRetries(
     minBackoff: Duration = 500.milliseconds,
     maxBackoff: Duration = 30.seconds,
     maxAttempts: Long = infiniteRetries,
-    retryOn: (Throwable) -> Boolean = { true },
+    retryOn: (Throwable) -> Boolean = ::isTransient,
 ): Many<T> = retry(retryPolicy(minBackoff, maxBackoff, maxAttempts, retryOn))

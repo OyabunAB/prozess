@@ -161,7 +161,7 @@ class FakeKafkaClientTest {
         val fake = FakeKafkaClient()
         val pm = CoordinatingPartitionManager(
             pendingSeeks = kotlin.concurrent.atomics.AtomicReference(emptyMap()),
-            ends = kotlin.concurrent.atomics.AtomicReference(emptySet()),
+            ends = kotlin.concurrent.atomics.AtomicReference(emptyMap()),
             paused = { false },
             instanceId = "test",
             log = Logging.logger { },
@@ -178,7 +178,7 @@ class FakeKafkaClientTest {
         val pendingSeeks = kotlin.concurrent.atomics.AtomicReference<Offsets>(mapOf(p0 to 100L))
         val pm = CoordinatingPartitionManager(
             pendingSeeks = pendingSeeks,
-            ends = kotlin.concurrent.atomics.AtomicReference(emptySet()),
+            ends = kotlin.concurrent.atomics.AtomicReference(emptyMap()),
             paused = { false },
             instanceId = "test",
             log = Logging.logger { },
@@ -195,7 +195,7 @@ class FakeKafkaClientTest {
         val fake = FakeKafkaClient()
         val pm = CoordinatingPartitionManager(
             pendingSeeks = kotlin.concurrent.atomics.AtomicReference(emptyMap()),
-            ends = kotlin.concurrent.atomics.AtomicReference(emptySet()),
+            ends = kotlin.concurrent.atomics.AtomicReference(emptyMap()),
             paused = { true },
             instanceId = "test",
             log = Logging.logger { },
@@ -298,7 +298,7 @@ class FakeKafkaClientTest {
         val fake = FakeKafkaClient()
         val pm = CoordinatingPartitionManager(
             pendingSeeks = kotlin.concurrent.atomics.AtomicReference(emptyMap()),
-            ends = kotlin.concurrent.atomics.AtomicReference(emptySet()),
+            ends = kotlin.concurrent.atomics.AtomicReference(emptyMap()),
             paused = { false },
             instanceId = "test",
             log = Logging.logger { },

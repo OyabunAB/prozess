@@ -77,7 +77,7 @@ class StreamingConsumer<M : Any>(
     private val closeSignal = Sinks.broadcast<Unit>()
     private val disposed    = java.util.concurrent.atomic.AtomicBoolean(false)
 
-    private val ends         = AtomicReference<Positions>(emptySet())
+    private val ends         = AtomicReference<Offsets>(emptyMap())
     private val started      = AtomicBoolean(false)
     private val pendingSeeks = AtomicReference<Offsets>(emptyMap())
     private val paused       = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -101,13 +101,13 @@ class StreamingConsumer<M : Any>(
         onPause  = {
             val current = partitionManager.assignments()
             log.kafka.bufferSaturated(instanceId, current, config.maxPollRecords)
-            if (current.isNotEmpty()) runBlocking { client.pause(current).await() }
+            if (current.isNotEmpty()) client.pause(current).await()
         },
         onResume = {
             val current = partitionManager.assignments()
             val size = config.maxPollRecords / 4
             log.kafka.bufferDrained(instanceId, current, size)
-            if (current.isNotEmpty()) runBlocking { client.resume(current).await() }
+            if (current.isNotEmpty()) client.resume(current).await()
         },
     )
 
@@ -259,28 +259,28 @@ class StreamingConsumer<M : Any>(
         .retry(Policy.retry().withBackoff(500.milliseconds, 30.seconds))
         .doOnSubscribe { log.kafka.listenerRestarted(instanceId, config.topics) }
 
-    private fun initOffsets(topicPartitions: Partitions, from: StartOffset, until: EndOffset): One<Positions> {
-        val loadEndings: One<Positions> = if (until is CatchUp)
-            client.endOffsets(topicPartitions).map { it.also { e -> ends.store(e) } }
-        else One.single(emptySet())
+    private fun initOffsets(topicPartitions: Partitions, from: StartOffset, until: EndOffset): One<Offsets> {
+        val loadEndings: One<Offsets> = if (until is CatchUp)
+            client.endOffsets(topicPartitions).map { positions -> positions.asOffsets().also { ends.store(it) } }
+        else One.single(emptyMap())
 
-        val loadBeginnings: One<Positions> = when (from) {
+        val loadBeginnings: One<Offsets> = when (from) {
             is Earliest -> client.committed(topicPartitions).flatMap { committed ->
                 val unseeded = topicPartitions.filter { it !in committed }.toSet()
-                if (unseeded.isEmpty()) One.single(emptySet())
+                if (unseeded.isEmpty()) One.single(emptyMap())
                 else client.beginningOffsets(unseeded).map { beginnings ->
                     val targets = beginnings.asOffsets()
                     if (targets.isNotEmpty()) pendingSeeks.store(targets)
-                    beginnings
+                    targets
                 }
             }
-            is Latest -> One.single(emptySet())
+            is Latest -> One.single(emptyMap())
             is AtTimestamp -> client.offsetsForTimes(topicPartitions, from.instant).flatMap { positions ->
                 if (positions.isEmpty())
                     client.endOffsets(topicPartitions).map { endOffsets ->
                         val targets = endOffsets.asOffsets()
                         if (targets.isNotEmpty()) pendingSeeks.store(targets)
-                        endOffsets
+                        targets
                     }
                 else zip(One.single(positions.asOffsets()), client.committed(topicPartitions)) { targets, committed ->
                     val filtered = targets.filterKeys { p ->
@@ -288,7 +288,7 @@ class StreamingConsumer<M : Any>(
                         known == null || known <= (targets[p] ?: 0L)
                     }
                     if (filtered.isNotEmpty()) pendingSeeks.store(filtered)
-                    positions
+                    filtered
                 }
             }
         }
@@ -299,7 +299,7 @@ class StreamingConsumer<M : Any>(
             from is AtTimestamp && until is CatchUp -> loadBeginnings.flatMap { loadEndings }
             until is CatchUp                        -> loadEndings
             from is AtTimestamp                     -> loadBeginnings
-            else                                    -> One.single(emptySet())
+            else                                    -> One.single(emptyMap())
         }
     }
 
@@ -313,9 +313,10 @@ class StreamingConsumer<M : Any>(
         return merge(committer.positions, assignmentTrigger)
             .filter { _ ->
                 val assignments = partitionManager.assignments()
+                val endOffsets  = ends.load()
                 assignments.isNotEmpty() && assignments.all { partition ->
-                    val lastPosition = ends.load().find { it.partition == partition }
-                    lastPosition == null || (committer.processedOffsets[partition] ?: 0L) >= lastPosition.offset
+                    val endOffset = endOffsets[partition]
+                    endOffset == null || (committer.processedOffsets[partition] ?: 0L) >= endOffset
                 }
             }
             .take(1)

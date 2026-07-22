@@ -97,10 +97,10 @@ class ErrorsTest {
             PollerAlreadyRunning("x"),
             PollerNotRunning("x"),
             CommitterAlreadyRunning("x"),
-            CommitFailure("x"),
+            CommitFailure("x", RuntimeException()),
             RetryExhausted("x", RuntimeException()),
             SendFailure("x", RuntimeException()),
-            TimeoutExpired("x"),
+            TimeoutExpired("x", RuntimeException()),
             AuthenticationFailure("x", RuntimeException()),
             SerializationFailure("x", RuntimeException()),
         )

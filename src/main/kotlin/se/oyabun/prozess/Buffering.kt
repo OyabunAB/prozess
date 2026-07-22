@@ -56,8 +56,8 @@ interface ReceivedBuffer {
 internal class InMemoryReceivedBuffer(
     private val highWaterMark: Int = Int.MAX_VALUE,
     private val lowWaterMark: Int = 0,
-    private val onPause: () -> Unit = {},
-    private val onResume: () -> Unit = {},
+    private val onPause: suspend () -> Unit = {},
+    private val onResume: suspend () -> Unit = {},
 ) : ReceivedBuffer {
 
     private val queue  = ConcurrentLinkedQueue<Received<ByteArray>>()

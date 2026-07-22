@@ -62,7 +62,7 @@ class PollerNotRunning(message: String) : ProzessException(message)
 class CommitterAlreadyRunning(message: String) : ProzessException(message)
 
 /** Thrown when a Kafka offset commit fails and retries are exhausted. */
-class CommitFailure(message: String, cause: Throwable? = null) : ProzessException(message, cause)
+class CommitFailure(message: String, cause: Throwable) : ProzessException(message, cause)
 
 /** Thrown when an operation fails and all retry attempts are exhausted. */
 class RetryExhausted(message: String, cause: Throwable) : ProzessException(message, cause)
@@ -71,7 +71,7 @@ class RetryExhausted(message: String, cause: Throwable) : ProzessException(messa
 class SendFailure(message: String, cause: Throwable) : ProzessException(message, cause)
 
 /** Thrown when a Kafka operation exceeds its configured timeout. */
-class TimeoutExpired(message: String, cause: Throwable? = null) : ProzessException(message, cause)
+class TimeoutExpired(message: String, cause: Throwable) : ProzessException(message, cause)
 
 /** Thrown when SASL authentication or ACL authorization fails. */
 class AuthenticationFailure(message: String, cause: Throwable) : ProzessException(message, cause)

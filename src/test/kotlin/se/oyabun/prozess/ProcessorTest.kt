@@ -192,22 +192,34 @@ class ProcessorTest {
     @Test
     fun `tracker emits highest contiguous offset when prefix fills`() {
         val tracker = ContiguousOffsetTracker()
+        tracker.seed(0)
         assertNull(tracker.onCompleted(Position(p0, 2)))
         assertNull(tracker.onCompleted(Position(p0, 1)))
         assertEquals(Position(p0, 2), tracker.onCompleted(Position(p0, 0)))
     }
 
     @Test
-    fun `tracker emits nothing until offset zero completes`() {
+    fun `tracker emits nothing until seed offset completes`() {
         val tracker = ContiguousOffsetTracker()
+        tracker.seed(0)
         assertNull(tracker.onCompleted(Position(p0, 2)))
         assertNull(tracker.onCompleted(Position(p0, 3)))
         assertEquals(Position(p0, 0), tracker.onCompleted(Position(p0, 0)))
     }
 
     @Test
+    fun `tracker initialized at non-zero offset does not require preceding offsets`() {
+        val tracker = ContiguousOffsetTracker()
+        tracker.seed(50)
+        assertNull(tracker.onCompleted(Position(p0, 52)))
+        assertNull(tracker.onCompleted(Position(p0, 51)))
+        assertEquals(Position(p0, 52), tracker.onCompleted(Position(p0, 50)))
+    }
+
+    @Test
     fun `tracker skips already processed offsets`() {
         val tracker = ContiguousOffsetTracker()
+        tracker.seed(0)
         assertEquals(Position(p0, 0), tracker.onCompleted(Position(p0, 0)))
         assertNull(tracker.onCompleted(Position(p0, 0)))
         assertEquals(Position(p0, 1), tracker.onCompleted(Position(p0, 1)))
@@ -217,6 +229,7 @@ class ProcessorTest {
     @Test
     fun `tracker emits highest contiguous after gap filled`() {
         val tracker = ContiguousOffsetTracker()
+        tracker.seed(0)
         assertEquals(Position(p0, 0), tracker.onCompleted(Position(p0, 0)))
         assertNull(tracker.onCompleted(Position(p0, 2)))
         assertEquals(Position(p0, 2), tracker.onCompleted(Position(p0, 1)))
@@ -225,6 +238,7 @@ class ProcessorTest {
     @Test
     fun `tracker never emits past a gap to prevent unsafe commits`() {
         val tracker = ContiguousOffsetTracker()
+        tracker.seed(0)
         assertNull(tracker.onCompleted(Position(p0, 3)))
         assertNull(tracker.onCompleted(Position(p0, 4)))
         assertNull(tracker.onCompleted(Position(p0, 6)))
@@ -241,6 +255,7 @@ class ProcessorTest {
     @Test
     fun `tracker does not emit beyond gap even when higher offsets arrive later`() {
         val tracker = ContiguousOffsetTracker()
+        tracker.seed(0)
         assertEquals(Position(p0, 0), tracker.onCompleted(Position(p0, 0)))
         assertNull(tracker.onCompleted(Position(p0, 2)))
         assertNull(tracker.onCompleted(Position(p0, 3)))
@@ -698,6 +713,7 @@ class ProcessorTest {
         val p = Partition(0, Topic("test"))
         val a = ContiguousOffsetTracker()
         val b = ContiguousOffsetTracker()
+        a.seed(0); b.seed(0)
         // Advance tracker A through offsets 0 and 1
         a.onCompleted(Position(p, 0))
         a.onCompleted(Position(p, 1))

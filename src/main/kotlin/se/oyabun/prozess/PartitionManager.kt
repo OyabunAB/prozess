@@ -89,7 +89,7 @@ internal interface PartitionManager {
 @OptIn(ExperimentalAtomicApi::class)
 internal class CoordinatingPartitionManager(
     private val pendingSeeks: AtomicReference<Offsets>,
-    private val ends: AtomicReference<Positions>,
+    private val ends: AtomicReference<Offsets>,
     private val paused: () -> Boolean,
     private val instanceId: String,
     private val log: Logger,
@@ -117,10 +117,10 @@ internal class CoordinatingPartitionManager(
             .filterKeys { it in partitions }
             .takeIf { it.isNotEmpty() }
             ?.let { context.seek(it) }
-        val endPositions = ends.load()
+        val endOffsets = ends.load()
         val done = partitions.mapNotNull { p ->
-            val endPos = endPositions.find { it.partition == p }
-            if (endPos != null && context.position(p) > endPos.offset) p to (endPos.offset + 1)
+            val endOffset = endOffsets[p]
+            if (endOffset != null && context.position(p) >= endOffset) p to endOffset
             else null
         }.toMap()
         return done
