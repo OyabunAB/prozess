@@ -104,7 +104,7 @@ internal class CoordinatingPartitionManager(
         val offsets = processedOffsets.filterKeys { it in partitions }
         if (offsets.isNotEmpty()) {
             context.commit(offsets)
-            log.kafka.committed(instanceId, partitions)
+            log.kafka.committed(instanceId, offsets.keys)
         }
         assignments.update { it - partitions }
     }
