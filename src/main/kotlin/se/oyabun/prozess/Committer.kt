@@ -123,7 +123,7 @@ internal class BufferedCommitter(
 ) : Committer {
 
     private val processedOffsetsRef  = KAtomicReference<Offsets>(emptyMap())
-    private val positionSink         = Sinks.broadcast<Position>()
+    private val positionSink         = Sinks.replay<Position>()
     private val committedOffsetsSink = Sinks.replayLast<Offsets>(1)
     private val doneSink             = Sinks.broadcast<Unit>()
     private val running              = AtomicBoolean(false)
