@@ -23,6 +23,7 @@ import se.oyabun.aelv.Many
 import se.oyabun.aelv.None
 import se.oyabun.aelv.One
 import se.oyabun.aelv.concatMap
+import se.oyabun.aelv.flatMap
 import se.oyabun.aelv.flatMapMany
 import se.oyabun.aelv.groupBy
 import java.util.concurrent.atomic.AtomicBoolean
@@ -58,7 +59,7 @@ class StreamingProducer<M : Any>(
     private val serializer: Prozess.Serializer<M>,
 ) {
     private val log        = Logging.logger { }
-    private val instanceId = "[$instance ${config.topic} producer]"
+    private val instanceId = "[$instance ${config.topic.name} producer]"
     private val delegate   = KafkaProducer<ByteArray?, ByteArray>(config.toKafkaProperties())
     private val dispatcher = kotlinx.coroutines.newSingleThreadContext("$instanceId-producer")
     private val closed     = AtomicBoolean(false)
@@ -101,7 +102,7 @@ class StreamingProducer<M : Any>(
             },
         )
     } else {
-        source.concatMap { element: M ->
+        source.flatMap { element: M ->
             send(element).flatMapMany { Many.items(element) }
         }
     }
