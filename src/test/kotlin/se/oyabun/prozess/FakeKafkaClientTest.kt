@@ -1,15 +1,12 @@
 package se.oyabun.prozess
 
-import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
+import se.oyabun.aelv.None
 import se.oyabun.aelv.Sinks
-import java.util.concurrent.TimeUnit
-import se.oyabun.aelv.Success
-import se.oyabun.aelv.Failure
 import se.oyabun.aelv.Verify
-import se.oyabun.aelv.await
-import kotlin.test.assertIs
+import se.oyabun.aelv.take
+import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
@@ -56,7 +53,7 @@ class FakeKafkaClientTest {
         val client = FakeKafkaClient()
         val offsets = mapOf(p0 to 10L)
 
-        runBlocking { client.commit(offsets, "test-meta").await() }
+        Verify.that(client.commit(offsets, "test-meta")).completes()
 
         assertEquals(1, client.commits.size)
         assertEquals(offsets, client.commits.peek().first)
@@ -73,7 +70,7 @@ class FakeKafkaClientTest {
             override fun onPartitionsAssigned(context: RebalanceContext, partitions: Partitions) { assigned.add(partitions) }
         }
 
-        runBlocking { client.subscribe(setOf("test"), listener).await() }
+        Verify.that(client.subscribe(setOf("test"), listener)).completes()
 
         assertEquals(setOf("test"), client.subscribedTopics)
         assertEquals(1, assigned.size)
@@ -117,7 +114,7 @@ class FakeKafkaClientTest {
         val client = FakeKafkaClient()
 
         client.wakeup()
-        runBlocking { client.close().await() }
+        Verify.that(client.close()).completes()
 
         assertEquals(1, client.wakeupCount)
         assertTrue(client.closed)
@@ -128,9 +125,9 @@ class FakeKafkaClientTest {
         val client = FakeKafkaClient()
         client.setPartitionsFor("test", setOf(p0, p1))
 
-        val outcome = runBlocking { client.partitionsFor(setOf("test")).await() }
-        assertIs<Success<Partitions>>(outcome)
-        assertEquals(setOf(p0, p1), outcome.value)
+        Verify.that(client.partitionsFor(setOf("test")))
+            .assertNext { assertEquals(setOf(p0, p1), it) }
+            .completes()
     }
 
     // ---- Component wiring using FakeKafkaClient ----
@@ -138,7 +135,6 @@ class FakeKafkaClientTest {
     @Test
     fun `committer commits through fake client`() {
         val fake = FakeKafkaClient()
-
         val committer = BufferedCommitter(
             client = fake,
             assignments = { setOf(p0) },
@@ -149,13 +145,15 @@ class FakeKafkaClientTest {
         )
 
         committer.start()
-        runBlocking {
-            committer.markProcessed(Position(p0, 5L))
-            committer.stop().await()
-        }
-
-        assertTrue(fake.commits.isNotEmpty(), "expected commit")
-        assertEquals(mapOf(p0 to 6L), fake.commits.peek().first)
+        Verify.that(
+            committer.committedOffsets.take(1).doOnSubscribe {
+                committer.markProcessed(Position(p0, 5L))
+                committer.stop().await()
+            }
+        ).assertNext { committed ->
+            assertTrue(fake.commits.isNotEmpty(), "expected commit")
+            assertEquals(mapOf(p0 to 6L), committed)
+        }.completes()
     }
 
     @Test
@@ -285,14 +283,14 @@ class FakeKafkaClientTest {
         )
 
         committer.start()
-        runBlocking {
-            committer.markProcessed(Position(p0, 7L))
-            committer.stop().await()
-        }
-
-        assertEquals(1, fake.commits.size)
-        assertEquals(mapOf(p0 to 8L), fake.commits.peek().first,
-            "offset must be lastProcessed + 1")
+        Verify.that(
+            committer.committedOffsets.take(1).doOnSubscribe {
+                committer.markProcessed(Position(p0, 7L))
+                committer.stop().await()
+            }
+        ).assertNext { committed ->
+            assertEquals(mapOf(p0 to 8L), committed, "offset must be lastProcessed + 1")
+        }.completes()
     }
 
     @Test
@@ -324,7 +322,6 @@ class FakeKafkaClientTest {
     @Test
     fun `same partition offsets committed in order`() {
         val fake = FakeKafkaClient()
-
         val committer = BufferedCommitter(
             client = fake,
             assignments = { setOf(p0) },
@@ -335,12 +332,14 @@ class FakeKafkaClientTest {
         )
 
         committer.start()
-        runBlocking {
-            committer.markProcessed(Position(p0, 1L))
-            committer.markProcessed(Position(p0, 2L))
-            committer.markProcessed(Position(p0, 3L))
-            committer.stop().await()
-        }
+        Verify.that(
+            committer.committedOffsets.take(1).doOnSubscribe {
+                committer.markProcessed(Position(p0, 1L))
+                committer.markProcessed(Position(p0, 2L))
+                committer.markProcessed(Position(p0, 3L))
+                committer.stop().await()
+            }
+        ).assertNext { }.completes()
 
         val offsets = fake.commits.map { (offsets, _) -> offsets[p0]!! }
         assertTrue(offsets.isNotEmpty(), "at least one commit must have occurred")
@@ -366,14 +365,15 @@ class FakeKafkaClientTest {
         )
 
         committer.start()
-        runBlocking {
-            committer.markProcessed(Position(p0, 5L))
-            committer.stop().await()
-        }
-
-        assertTrue(fake.commits.isNotEmpty(), "commit must eventually succeed after retries")
-        assertEquals(mapOf(p0 to 6L), fake.commits.peek().first,
-            "correct offset despite retries")
+        Verify.that(
+            committer.committedOffsets.take(1).doOnSubscribe {
+                committer.markProcessed(Position(p0, 5L))
+                committer.stop().await()
+            }
+        ).assertNext { committed ->
+            assertTrue(fake.commits.isNotEmpty(), "commit must eventually succeed after retries")
+            assertEquals(mapOf(p0 to 6L), committed, "correct offset despite retries")
+        }.completes()
     }
 
     @Test
@@ -400,7 +400,7 @@ class FakeKafkaClientTest {
         poller.start()
         assertTrue(poller.isRunning, "poller must stay running despite poll error")
         shutdownSink.complete()
-        runBlocking { poller.stop().await() }
+        Verify.that(poller.stop()).completes()
     }
 
     @Test

@@ -64,7 +64,7 @@ class ProcessorTest {
         )
         val messages = Many.items(received(p0, 0, "hello"), received(p0, 1, "world"))
 
-        runBlocking { processor.process(messages).last() }
+        Verify.that(processor.process(messages)).emitsCount(2).completes()
 
         assertEquals(listOf("hello", "world"), processed)
     }
@@ -134,7 +134,7 @@ class ProcessorTest {
         )
         val messages = Many.items(received(p0, 0, "a"), received(p0, 1, "b"), received(p0, 2, "c"))
 
-        runBlocking { processor.process(messages).last() }
+        Verify.that(processor.process(messages)).emitsCount(3).completes()
 
         assertEquals(listOf(listOf("a", "b"), listOf("c")), batches)
     }
@@ -268,7 +268,7 @@ class ProcessorTest {
             received(p0, 2, "a"),
         )
 
-        runBlocking { processor.process(messages).last() }
+        Verify.that(processor.process(messages)).completes()
 
         assertEquals(3, processed.size)
         assertTrue(processed.any { it == "a:a" }, "key 'a' processed")
@@ -295,7 +295,8 @@ class ProcessorTest {
             received(p0, 3, "b"),
         )
 
-        val lastPosition = runBlocking { processor.process(messages).last().await().rightOrNull() }
+        var lastPosition: Position? = null
+        Verify.that(processor.process(messages).doOnNext { lastPosition = it }).completes()
 
         assertEquals(Position(p0, 3), lastPosition)
     }
@@ -347,7 +348,7 @@ class ProcessorTest {
             received(p0, 3, "b"),
         )
 
-        runBlocking { processor.process(messages).last() }
+        Verify.that(processor.process(messages)).emitsCount(4).completes()
 
         assertEquals(2, batches.size)
     }
@@ -374,7 +375,8 @@ class ProcessorTest {
             received(p0, 3, "b"),
         )
 
-        val lastPosition = runBlocking { processor.process(messages).last().await().rightOrNull() }
+        var lastPosition: Position? = null
+        Verify.that(processor.process(messages).doOnNext { lastPosition = it }).completes()
 
         assertEquals(Position(p0, 3), lastPosition)
     }

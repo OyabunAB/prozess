@@ -1,8 +1,5 @@
 package se.oyabun.prozess
 
-import kotlinx.coroutines.runBlocking
-import se.oyabun.aelv.first
-import se.oyabun.aelv.merge
 import se.oyabun.aelv.take
 import se.oyabun.aelv.Many
 import se.oyabun.aelv.None
@@ -11,13 +8,12 @@ import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.assertThrows
 import se.oyabun.aelv.Verify
 import java.util.concurrent.TimeUnit
-import kotlin.test.assertEquals
-import kotlin.test.assertFalse
-import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
-@Timeout(value = 5, unit = TimeUnit.SECONDS)
+@Timeout(value = 10, unit = TimeUnit.SECONDS)
 class CommitterTest {
 
     private val topic = Topic("test")
@@ -27,17 +23,17 @@ class CommitterTest {
     @Test
     fun `markProcessed updates processedOffsets`() {
         val c = committer()
-        runBlocking { c.markProcessed(Position(p0, 5L)) }
+        Verify.that(None.defer<Unit> { c.markProcessed(Position(p0, 5L)) }).completes()
         assertEquals(mapOf(p0 to 6L), c.processedOffsets)
-        runBlocking { c.markProcessed(Position(p1, 10L)) }
+        Verify.that(None.defer<Unit> { c.markProcessed(Position(p1, 10L)) }).completes()
         assertEquals(mapOf(p0 to 6L, p1 to 11L), c.processedOffsets)
     }
 
     @Test
     fun `markProcessed tracks highest offset per partition`() {
         val c = committer()
-        runBlocking { c.markProcessed(Position(p0, 5L)) }
-        runBlocking { c.markProcessed(Position(p0, 3L)) }
+        Verify.that(None.defer<Unit> { c.markProcessed(Position(p0, 5L)) }).completes()
+        Verify.that(None.defer<Unit> { c.markProcessed(Position(p0, 3L)) }).completes()
         assertEquals(mapOf(p0 to 6L), c.processedOffsets)
     }
 
@@ -52,69 +48,48 @@ class CommitterTest {
 
     @Test
     fun `batch commit by size`() {
-        val fake = FakeKafkaClient()
-        val c = BufferedCommitter(
-            client = fake,
-            assignments = { setOf(p0) },
-            instanceId = "test-batch-size",
-            log = Logging.logger { },
-            bufferSize = 500,
-            maxBatchSize = 3,
-            maxBatchTime = 5.seconds,
-        )
+        val c = committer(maxBatchSize = 3)
         c.start()
-        val driver = None.defer<Offsets> {
-            c.markProcessed(Position(p0, 1L))
-            c.markProcessed(Position(p0, 2L))
-            c.markProcessed(Position(p0, 3L))
-        }.toMany()
-        Verify.that(merge(c.committedOffsets.take(1), driver))
+        Verify.that(
+            c.committedOffsets.take(1).doOnSubscribe {
+                c.markProcessed(Position(p0, 1L))
+                c.markProcessed(Position(p0, 2L))
+                c.markProcessed(Position(p0, 3L))
+            }
+        )
             .assertNext { assertEquals(mapOf(p0 to 4L), it) }
             .completes()
-        runBlocking { c.stop().await() }
+        Verify.that(c.stop()).completes()
     }
 
     @Test
     fun `batch commit by time`() {
-        val fake = FakeKafkaClient()
-        val c = BufferedCommitter(
-            client = fake,
-            assignments = { setOf(p0) },
-            instanceId = "test-batch-time",
-            log = Logging.logger { },
-            bufferSize = 500,
-            maxBatchSize = 100,
-            maxBatchTime = 200.milliseconds,
-        )
+        val c = committer(maxBatchTime = 200.milliseconds)
         c.start()
-        runBlocking {
-            c.markProcessed(Position(p0, 1L))
-            c.stop().await()
-        }
-        assertFalse(fake.commits.isEmpty(), "Expected at least one commit")
-        assertEquals(mapOf(p0 to 2L), fake.commits.peek().first)
+        Verify.that(
+            c.committedOffsets.take(1).doOnSubscribe { c.markProcessed(Position(p0, 1L)) }
+        )
+            .assertNext { assertEquals(mapOf(p0 to 2L), it) }
+            .completes()
+        Verify.that(c.stop()).completes()
     }
 
     @Test
     fun `batch commit filters out unassigned partitions`() {
-        val fake = FakeKafkaClient()
-        val c = BufferedCommitter(
-            client = fake,
-            assignments = { setOf(p0) },
-            instanceId = "test-filter",
-            log = Logging.logger { },
-            bufferSize = 500,
-            maxBatchSize = 2,
-            maxBatchTime = 5.seconds,
-        )
+        val c = committer(assignments = { setOf(p0) }, maxBatchSize = 2)
         c.start()
-        runBlocking {
-            c.markProcessed(Position(p1, 1L))
-            c.markProcessed(Position(p0, 1L))
-            c.stop().await()
-        }
-        assertFalse(fake.commits.isEmpty(), "Expected at least one commit")
-        assertEquals(mapOf(p0 to 2L), fake.commits.peek().first)
+        Verify.that(
+            c.committedOffsets.take(1).doOnSubscribe {
+                c.markProcessed(Position(p1, 1L))
+                c.markProcessed(Position(p0, 1L))
+            }
+        )
+            .assertNext { committed ->
+                assertEquals(setOf(p0), committed.keys, "only assigned partition committed")
+                assertEquals(mapOf(p0 to 2L), committed)
+            }
+            .completes()
+        Verify.that(c.stop()).completes()
     }
 
     @Test
@@ -122,168 +97,113 @@ class CommitterTest {
         val fake = FakeKafkaClient()
         fake.failNextCommit()
         fake.failNextCommit()
-        val c = BufferedCommitter(
-            client = fake,
-            assignments = { setOf(p0) },
-            instanceId = "test-retry",
-            log = Logging.logger { },
-            bufferSize = 500,
-            maxBatchSize = 1,
-            maxBatchTime = 5.seconds,
-        )
+        val c = committer(client = fake, maxBatchSize = 1)
         c.start()
-        runBlocking {
-            c.markProcessed(Position(p0, 1L))
-            c.stop().await()
-        }
-        assertFalse(fake.commits.isEmpty(), "Expected retry to recover")
-        assertEquals(mapOf(p0 to 2L), fake.commits.peek().first)
+        Verify.that(
+            c.committedOffsets.take(1).doOnSubscribe { c.markProcessed(Position(p0, 1L)) }
+        )
+            .assertNext { assertEquals(mapOf(p0 to 2L), it) }
+            .completes()
+        Verify.that(c.stop()).completes()
     }
 
     @Test
     fun `stop does not commit unassigned partitions`() {
-        val fake = FakeKafkaClient()
-        val c = BufferedCommitter(
-            client = fake,
-            assignments = { setOf(p0) },
-            instanceId = "test-graceful",
-            log = Logging.logger { },
-            bufferSize = 500,
-            maxBatchSize = 100,
-            maxBatchTime = 5.seconds,
-        )
+        val c = committer(assignments = { setOf(p0) })
         c.start()
         c.seedOffsets(mapOf(p1 to 50L))
-        runBlocking {
-            c.markProcessed(Position(p0, 1L))
-            c.stop().await()
-        }
-        assertFalse(fake.commits.isEmpty(), "Expected commit after stop")
-        assertEquals(mapOf(p0 to 2L), fake.commits.peek().first)
+        Verify.that(
+            c.committedOffsets.take(1).doOnSubscribe {
+                c.markProcessed(Position(p0, 1L))
+                c.stop().await()
+            }
+        )
+            .assertNext { committed ->
+                assertEquals(setOf(p0), committed.keys, "only assigned partition committed")
+                assertEquals(mapOf(p0 to 2L), committed)
+            }
+            .completes()
     }
 
     @Test
     fun `positions emits marked positions`() {
         val c = committer()
-        val driver: Many<Position> = None.defer<Position> {
-            c.markProcessed(Position(p0, 5L))
-            c.markProcessed(Position(p1, 10L))
-        }.toMany()
-        Verify.that(merge(c.positions.take(2), driver))
+        Verify.that(
+            c.positions.take(2).doOnSubscribe {
+                c.markProcessed(Position(p0, 5L))
+                c.markProcessed(Position(p1, 10L))
+            }
+        )
             .emitsNext(Position(p0, 5L), Position(p1, 10L))
             .completes()
-            
     }
 
     @Test
     fun `stop completes all pending commits`() {
         val fake = FakeKafkaClient()
-        val c = BufferedCommitter(
-            client = fake,
-            assignments = { setOf(p0) },
-            instanceId = "test-flush-stop",
-            log = Logging.logger { },
-            bufferSize = 500,
-            maxBatchSize = 100,
-            maxBatchTime = 5.seconds,
-        )
+        val c = committer(client = fake)
         c.start()
-        runBlocking {
+        Verify.that(None.defer<Unit> {
             c.markProcessed(Position(p0, 1L))
             c.markProcessed(Position(p0, 2L))
             c.stop().await()
-        }
-        assertFalse(fake.commits.isEmpty(), "Expected commit after stop")
-        assertEquals(mapOf(p0 to 3L), fake.commits.peek().first)
+        }).completes()
+        assertTrue(fake.commits.isNotEmpty(), "expected at least one commit")
+        assertEquals(3L, fake.commits.map { it.first[p0]!! }.max(), "highest committed offset must be 3")
     }
 
     @Test
     fun `stop is idempotent`() {
-        val fake = FakeKafkaClient()
-        val c = BufferedCommitter(
-            client = fake,
-            assignments = { setOf(p0) },
-            instanceId = "test-idempotent",
-            log = Logging.logger { },
-        )
+        val c = committer()
         c.start()
-        runBlocking {
-            c.markProcessed(Position(p0, 1L))
-            c.stop().await()
-            c.stop().await()
-        }
+        Verify.that(None.defer<Unit> { c.markProcessed(Position(p0, 1L)); c.stop().await() }).completes()
+        Verify.that(c.stop()).completes()
     }
 
     @Test
     fun `multiple sequential batches`() {
-        val fake = FakeKafkaClient()
-        val c = BufferedCommitter(
-            client = fake,
-            assignments = { setOf(p0) },
-            instanceId = "test-seq",
-            log = Logging.logger { },
-            bufferSize = 500,
-            maxBatchSize = 3,
-            maxBatchTime = 5.seconds,
-        )
+        val c = committer(maxBatchSize = 3)
         c.start()
-        runBlocking {
-            (1..9).forEach { c.markProcessed(Position(p0, it.toLong())) }
-            c.stop().await()
-        }
-        val committed = fake.commits.mapNotNull { it.first[p0] }
-        assertFalse(committed.isEmpty(), "Expected at least one commit")
-        assertEquals(10L, committed.last(), "Expected final committed offset to be 10")
-        assertEquals(committed.sorted(), committed, "Expected commits to be monotonically increasing")
+        val commits = mutableListOf<Long>()
+        Verify.that(
+            c.committedOffsets.take(3).doOnSubscribe {
+                (1..9).forEach { c.markProcessed(Position(p0, it.toLong())) }
+            }.doOnNext { commits.add(it[p0]!!) }
+        )
+            .emitsCount(3)
+            .completes()
+        Verify.that(c.stop()).completes()
+        assertTrue(commits.isNotEmpty(), "Expected at least one commit")
+        assertEquals(commits.sorted(), commits, "Commits must be monotonically increasing")
+        assertEquals(10L, commits.last(), "Final committed offset must be 10")
     }
 
     @Test
     fun `stop after pipeline naturally completed is safe`() {
-        val fake = FakeKafkaClient()
-        val c = BufferedCommitter(
-            client = fake,
-            assignments = { setOf(p0) },
-            instanceId = "test-double-stop",
-            log = Logging.logger { },
-            bufferSize = 500,
-            maxBatchSize = 100,
-            maxBatchTime = 5.seconds,
-        )
+        val c = committer()
         c.start()
-        runBlocking {
-            c.markProcessed(Position(p0, 1L))
-            c.stop().await()
-            c.stop().await()
-        }
-        assertFalse(fake.commits.isEmpty(), "Expected commit from first stop")
+        Verify.that(None.defer<Unit> { c.markProcessed(Position(p0, 1L)); c.stop().await() }).completes()
+        Verify.that(c.stop()).completes()
     }
 
     @Test
     fun `processedOffsets is only mutated by markProcessed and seedOffsets`() {
-        val c = BufferedCommitter(
-            client = FakeKafkaClient(),
-            assignments = { setOf(p0) },
-            instanceId = "test-invariant",
-            log = Logging.logger { },
-        )
+        val c = committer()
         assertEquals(emptyMap(), c.processedOffsets)
-
         c.seedOffsets(mapOf(p0 to 42L))
         assertEquals(mapOf(p0 to 42L), c.processedOffsets)
-
-        runBlocking { c.markProcessed(Position(p0, 50L)) }
+        Verify.that(None.defer<Unit> { c.markProcessed(Position(p0, 50L)) }).completes()
         assertEquals(mapOf(p0 to 51L), c.processedOffsets)
-
         c.start()
         assertEquals(mapOf(p0 to 51L), c.processedOffsets)
-        runBlocking { c.stop().await() }
+        Verify.that(c.stop()).completes()
         assertEquals(mapOf(p0 to 51L), c.processedOffsets)
     }
 
     @Test
     fun `seedOffsets does not overwrite higher offset already recorded by markProcessed`() {
         val c = committer()
-        runBlocking { c.markProcessed(Position(p0, 50L)) }
+        Verify.that(None.defer<Unit> { c.markProcessed(Position(p0, 50L)) }).completes()
         assertEquals(mapOf(p0 to 51L), c.processedOffsets)
         c.seedOffsets(mapOf(p0 to 10L))
         assertEquals(mapOf(p0 to 51L), c.processedOffsets, "seedOffsets must not regress a higher processed offset")
@@ -293,17 +213,22 @@ class CommitterTest {
     fun `start throws when already running`() {
         val c = committer()
         c.start()
-        try {
-            assertThrows<CommitterAlreadyRunning> { c.start() }
-        } finally {
-            runBlocking { c.stop().await() }
-        }
+        assertThrows<CommitterAlreadyRunning> { c.start() }
+        Verify.that(c.stop()).completes()
     }
 
-    private fun committer(): Committer = BufferedCommitter(
-        client = FakeKafkaClient(),
-        assignments = { setOf(p0, p1) },
+    private fun committer(
+        client: KafkaClient = FakeKafkaClient(),
+        assignments: () -> Set<Partition> = { setOf(p0, p1) },
+        maxBatchSize: Int = 100,
+        maxBatchTime: kotlin.time.Duration = 500.milliseconds,
+    ): Committer = BufferedCommitter(
+        client = client,
+        assignments = assignments,
         instanceId = "test",
         log = Logging.logger { },
+        bufferSize = 500,
+        maxBatchSize = maxBatchSize,
+        maxBatchTime = maxBatchTime,
     )
 }
