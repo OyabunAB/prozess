@@ -33,26 +33,23 @@ class Logger(private val delegate: org.slf4j.Logger) {
     val processing = Processing()
 
     inner class Kafka {
-        fun subscribed(instance: String, topics: Any)                              = delegate.info("{} subscribed to {}", instance, topics)
-        fun shuttingDown(instance: String, topics: Any)                            = delegate.info("{} shutting down subscription to {}", instance, topics)
-        fun assigned(instance: String, partitions: Any)                            = delegate.info("{} was assigned to {}", instance, partitions)
-        fun revoked(instance: String, partitions: Any)                             = delegate.info("{} was revoked from {}", instance, partitions)
-        fun completed(component: String)                                           = delegate.debug("{} completed", component)
+        fun subscribed(instance: String, topics: Any)                              = delegate.info("$instance subscribed to $topics")
+        fun shuttingDown(instance: String, topics: Any)                            = delegate.info("$instance shutting down subscription to $topics")
+        fun assigned(instance: String, partitions: Any)                            = delegate.info("$instance was assigned to $partitions")
+        fun revoked(instance: String, partitions: Any)                             = delegate.info("$instance was revoked from $partitions")
+        fun completed(component: String)                                           = delegate.debug("$component completed")
         fun terminatedUnexpectedly(component: String, cause: Throwable)            = delegate.error("$component terminated unexpectedly", cause)
-        /** Consumer pipeline restarted after a failure. */
-        fun listenerRestarted(instance: String, topics: Any)                       = delegate.info("{} restarted subscription to {}", instance, topics)
-        fun polled(instance: String, count: Int)                                   = delegate.trace("{} polled {} records (buffering)", instance, count)
-        /** Buffer hit high-water mark — partitions paused until it drains. */
-        fun bufferSaturated(instance: String, assignments: Any, size: Int)         = delegate.warn("{} buffer saturated at {} records — pausing {}", instance, size, assignments)
-        /** Buffer drained to low-water mark — partitions resumed. */
-        fun bufferDrained(instance: String, assignments: Any, size: Int)           = delegate.debug("{} buffer drained to {} records — resuming {}", instance, size, assignments)
-        fun committed(instance: String, partitions: Any)                           = delegate.trace("{} committed {} successfully", instance, partitions)
+        fun listenerRestarted(instance: String, topics: Any)                       = delegate.info("$instance restarted subscription to $topics")
+        fun polled(instance: String, count: Int)                                   = delegate.trace("$instance polled $count records (buffering)")
+        fun bufferSaturated(instance: String, assignments: Any, size: Int)         = delegate.warn("$instance buffer saturated at $size records — pausing $assignments")
+        fun bufferDrained(instance: String, assignments: Any, size: Int)           = delegate.debug("$instance buffer drained to $size records — resuming $assignments")
+        fun committed(instance: String, partitions: Any)                           = delegate.trace("$instance committed $partitions successfully")
         fun commitFailed(instance: String, partitions: Any, cause: Throwable)      = delegate.warn("$instance failed to commit $partitions", cause)
-        fun consumerFailed(instance: String, topics: Any, cause: Throwable)        = delegate.warn("$instance consumer error on {}, will retry", topics, cause)
+        fun consumerFailed(instance: String, topics: Any, cause: Throwable)        = delegate.warn("$instance consumer error on $topics, will retry", cause)
     }
 
     inner class Producer {
-        fun sent(instance: String, offset: Long)                                   = delegate.trace("{} sent record at offset {}", instance, offset)
+        fun sent(instance: String, offset: Long)                                   = delegate.trace("$instance sent record at offset $offset")
         fun sendFailed(instance: String, cause: Throwable)                         = delegate.warn("$instance failed to send record", cause)
         fun sendRetrying(instance: String, attempt: Long, cause: Throwable) {
             when {
@@ -60,26 +57,20 @@ class Logger(private val delegate: org.slf4j.Logger) {
                 else         -> delegate.error("$instance send stuck at attempt $attempt", cause)
             }
         }
-        fun sendRecovered(instance: String, attempts: Long)                        = delegate.info("{} send recovered after {} retries", instance, attempts)
+        fun sendRecovered(instance: String, attempts: Long)                        = delegate.info("$instance send recovered after $attempts retries")
     }
 
     inner class Processing {
-        /** Record had a null Kafka value (tombstone / delete marker). */
-        fun tombstone(position: Position)                    = delegate.info("tombstone at {}", position)
-        /** Record skipped — deserialization returned PoisonPill. */
-        fun poisonPill(position: Position, reason: String?) = delegate.warn("skipping poison pill at {}{}", position, reason?.let { ": $it" } ?: "")
-        /**
-         * Handler threw and the record is being retried.
-         * Escalates from warn → error at attempt 10, then error every 100 attempts.
-         */
+        fun tombstone(position: Position)                    = delegate.info("tombstone at $position")
+        fun poisonPill(position: Position, reason: String?) = delegate.warn("skipping poison pill at $position${reason?.let { ": $it" } ?: ""}")
         fun handlerRetrying(position: Position, attempt: Long, cause: Throwable) {
             when {
-                attempt < 10L        -> delegate.warn("handler retrying at {} (attempt {}): {}", position, attempt, cause.javaClass.simpleName)
-                attempt == 10L       -> delegate.error("handler stuck at {} after {} attempts", position, attempt, cause)
-                attempt % 100L == 0L -> delegate.error("handler critical at {} — {} retries", position, attempt, cause)
+                attempt < 10L        -> delegate.warn("handler retrying at $position (attempt $attempt): ${cause.javaClass.simpleName}")
+                attempt == 10L       -> delegate.error("handler stuck at $position after $attempt attempts", cause)
+                attempt % 100L == 0L -> delegate.error("handler critical at $position — $attempt retries", cause)
             }
         }
-        fun handlerRecovered(position: Position, attempts: Long) = delegate.info("handler recovered at {} after {} retries", position, attempts)
+        fun handlerRecovered(position: Position, attempts: Long) = delegate.info("handler recovered at $position after $attempts retries")
     }
 }
 
