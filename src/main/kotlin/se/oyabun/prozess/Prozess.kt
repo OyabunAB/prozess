@@ -397,7 +397,7 @@ object Prozess {
         partitionExtractor: PartitionExtractor<M> = { NO_PARTITION },
         timestampExtractor: TimestampExtractor<M> = { NO_TIMESTAMP },
         instance: String = shortId(),
-    ): Producer.Unkeyed<M> = UnkeyedProducerImpl(
+    ): Producer.Unkeyed<M> = ProducerImpl(
         StreamingProducer(config, instance, null, null, headerEnricher, partitionExtractor, timestampExtractor, serializer),
         instance,
     )
@@ -423,35 +423,20 @@ object Prozess {
         partitionExtractor: PartitionExtractor<M> = { NO_PARTITION },
         timestampExtractor: TimestampExtractor<M> = { NO_TIMESTAMP },
         instance: String = shortId(),
-    ): Producer.Keyed<M> = KeyedProducerImpl(
+    ): Producer.Keyed<M> = ProducerImpl(
         StreamingProducer(config, instance, keyExtractor, { m -> keySerializer(keyExtractor(m)) }, headerEnricher, partitionExtractor, timestampExtractor, serializer),
         instance,
     )
 
-    private class UnkeyedProducerImpl<M : Any>(
+    private class ProducerImpl<M : Any>(
         private val delegate: StreamingProducer<M>,
         private val instance: String,
-    ) : Producer.Unkeyed<M> {
+    ) : Producer.Keyed<M>, Producer.Unkeyed<M> {
         override fun send(value: M): Long =
             runBlocking { delegate.send(value).await() }.valueOrThrow(instance)
         override fun sendAll(messages: Collection<M>): List<M> =
             runBlocking { delegate.sendAll(Many.from(messages)).toList().await() }.valueOrThrow(instance)
-        override fun sendOffsetsToTransaction(offsets: Offsets, member: GroupMember) { runBlocking { delegate.sendOffsetsToTransaction(offsets, member).await() } }
-        override fun initTransactions()  { runBlocking { delegate.initTransactions().await() } }
-        override fun beginTransaction()  { runBlocking { delegate.beginTransaction().await() } }
-        override fun commitTransaction() { runBlocking { delegate.commitTransaction().await() } }
-        override fun abortTransaction()  { runBlocking { delegate.abortTransaction().await() } }
-        override fun close()             { runBlocking { delegate.close().await() } }
-    }
-
-    private class KeyedProducerImpl<M : Any>(
-        private val delegate: StreamingProducer<M>,
-        private val instance: String,
-    ) : Producer.Keyed<M> {
-        override fun send(value: M): Long =
-            runBlocking { delegate.send(value).await() }.valueOrThrow(instance)
-        override fun sendAll(messages: Collection<M>): List<M> =
-            runBlocking { delegate.sendAll(Many.from(messages)).toList().await() }.valueOrThrow(instance)
+        override fun sendAll(vararg messages: M): List<M> = sendAll(messages.toList())
         override fun sendOffsetsToTransaction(offsets: Offsets, member: GroupMember) { runBlocking { delegate.sendOffsetsToTransaction(offsets, member).await() } }
         override fun initTransactions()  { runBlocking { delegate.initTransactions().await() } }
         override fun beginTransaction()  { runBlocking { delegate.beginTransaction().await() } }
