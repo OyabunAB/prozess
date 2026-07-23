@@ -106,11 +106,11 @@ data class ProducerConfig(
             }
         }
         put(ApacheProducerConfig.COMPRESSION_TYPE_CONFIG, compression.value)
-        put(ApacheProducerConfig.LINGER_MS_CONFIG, linger.inWholeMilliseconds.toInt())
+        put(ApacheProducerConfig.LINGER_MS_CONFIG, linger.inWholeMilliseconds.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
         put(ApacheProducerConfig.BATCH_SIZE_CONFIG, batchSize)
         put(ApacheProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, maxInFlight)
         put(ApacheProducerConfig.BUFFER_MEMORY_CONFIG, bufferMemory)
-        put(ApacheProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, requestTimeout.inWholeMilliseconds.toInt())
+        put(ApacheProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, requestTimeout.inWholeMilliseconds.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
         putAll(security.toProperties())
     }
 }
@@ -185,13 +185,13 @@ internal fun ConsumerConfig.toKafkaProperties(): Map<String, Any> = buildMap {
     clientId?.let { put(ApacheConsumerConfig.CLIENT_ID_CONFIG, it) }
     groupInstanceId?.let { put(ApacheConsumerConfig.GROUP_INSTANCE_ID_CONFIG, it) }
     put(ApacheConsumerConfig.AUTO_OFFSET_RESET_CONFIG, startOffset.autoOffsetReset())
-    put(ApacheConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, sessionTimeout.inWholeMilliseconds.toInt())
-    put(ApacheConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG, heartbeatInterval.inWholeMilliseconds.toInt())
-    put(ApacheConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, maxPollInterval.inWholeMilliseconds.toInt())
+    put(ApacheConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, sessionTimeout.inWholeMilliseconds.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+    put(ApacheConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG, heartbeatInterval.inWholeMilliseconds.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+    put(ApacheConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, maxPollInterval.inWholeMilliseconds.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
     put(ApacheConsumerConfig.MAX_POLL_RECORDS_CONFIG, maxPollRecords)
     put(ApacheConsumerConfig.FETCH_MIN_BYTES_CONFIG, fetchMinBytes)
     put(ApacheConsumerConfig.FETCH_MAX_BYTES_CONFIG, fetchMaxBytes)
-    put(ApacheConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG, fetchMaxWait.inWholeMilliseconds.toInt())
+    put(ApacheConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG, fetchMaxWait.inWholeMilliseconds.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
     put(ApacheConsumerConfig.MAX_PARTITION_FETCH_BYTES_CONFIG, maxPartitionFetchBytes)
     put(ApacheConsumerConfig.ISOLATION_LEVEL_CONFIG, isolationLevel.value)
     putAll(security.toProperties())
